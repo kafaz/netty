@@ -28,47 +28,60 @@ import io.netty.example.util.ServerUtil;
 import io.netty.handler.ssl.SslContext;
 
 /**
- * Sends one message when a connection is open and echoes back any received
- * data to the server.  Simply put, the echo client initiates the ping-pong
- * traffic between the echo client and server by sending the first message to
- * the server.
+ * Echo客户端类
+ * 当连接建立时发送一条消息，并将从服务器收到的任何数据回显。
+ * 简单来说，Echo客户端通过向服务器发送第一条消息来启动客户端和服务器之间的数据来回传输。
  */
 public final class EchoClient {
 
+    // 服务器主机地址，默认为本地地址127.0.0.1
     static final String HOST = System.getProperty("host", "127.0.0.1");
+    // 服务器端口，默认为8007
     static final int PORT = Integer.parseInt(System.getProperty("port", "8007"));
+    // 发送消息的大小，默认为256字节
     static final int SIZE = Integer.parseInt(System.getProperty("size", "256"));
 
     public static void main(String[] args) throws Exception {
-        // Configure SSL.git
+        // 配置SSL上下文
         final SslContext sslCtx = ServerUtil.buildSslContext();
 
-        // Configure the client.
+        // 创建EventLoopGroup，用于处理客户端的事件和IO
         EventLoopGroup group = new NioEventLoopGroup();
         try {
+            // 创建客户端启动引导类
             Bootstrap b = new Bootstrap();
-            b.group(group)
+            b.group(group)  // 设置EventLoopGroup
+             // 设置要使用的Channel类型为NIO客户端Socket通道
              .channel(NioSocketChannel.class)
+             // 设置TCP无延迟选项
              .option(ChannelOption.TCP_NODELAY, true)
+             // 设置处理器
              .handler(new ChannelInitializer<SocketChannel>() {
                  @Override
                  public void initChannel(SocketChannel ch) throws Exception {
+                     // 获取Channel的ChannelPipeline
                      ChannelPipeline p = ch.pipeline();
+                     // 如果配置了SSL，添加SSL处理器
                      if (sslCtx != null) {
                          p.addLast(sslCtx.newHandler(ch.alloc(), HOST, PORT));
                      }
+                     // 可选：添加日志处理器，用于调试
                      //p.addLast(new LoggingHandler(LogLevel.INFO));
+                     // 添加Echo客户端处理器，处理实际的业务逻辑
                      p.addLast(new EchoClientHandler());
                  }
              });
 
-            // Start the client.
+            // 启动客户端
+            // 连接到服务器，并等待连接完成
             ChannelFuture f = b.connect(HOST, PORT).sync();
 
-            // Wait until the connection is closed.
+            // 等待，直到连接关闭
+            // 这里会阻塞等待，直到客户端Channel关闭
             f.channel().closeFuture().sync();
         } finally {
-            // Shut down the event loop to terminate all threads.
+            // 优雅关闭EventLoopGroup
+            // 释放所有资源，并关闭所有线程
             group.shutdownGracefully();
         }
     }
