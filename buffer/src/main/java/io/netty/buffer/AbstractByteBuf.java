@@ -15,19 +15,6 @@
  */
 package io.netty.buffer;
 
-import io.netty.util.AsciiString;
-import io.netty.util.ByteProcessor;
-import io.netty.util.CharsetUtil;
-import io.netty.util.IllegalReferenceCountException;
-import io.netty.util.ResourceLeakDetector;
-import io.netty.util.ResourceLeakDetectorFactory;
-import io.netty.util.internal.ObjectUtil;
-import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.SystemPropertyUtil;
-import io.netty.util.internal.logging.InternalLogger;
-import io.netty.util.internal.logging.InternalLoggerFactory;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -38,40 +25,117 @@ import java.nio.channels.GatheringByteChannel;
 import java.nio.channels.ScatteringByteChannel;
 import java.nio.charset.Charset;
 
+import io.netty.util.AsciiString;
+import io.netty.util.ByteProcessor;
+import io.netty.util.CharsetUtil;
+import io.netty.util.IllegalReferenceCountException;
+import io.netty.util.ResourceLeakDetector;
+import io.netty.util.ResourceLeakDetectorFactory;
 import static io.netty.util.internal.MathUtil.isOutOfBounds;
+import io.netty.util.internal.ObjectUtil;
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
+import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.StringUtil;
+import io.netty.util.internal.SystemPropertyUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
  * A skeletal implementation of a buffer.
  */
 public abstract class AbstractByteBuf extends ByteBuf {
+    // 获取当前类的日志记录器实例
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractByteBuf.class);
+
+    // 旧版本的可访问性检查属性名（用于向后兼容）
     private static final String LEGACY_PROP_CHECK_ACCESSIBLE = "io.netty.buffer.bytebuf.checkAccessible";
+
+    // 新版本的可访问性检查属性名
     private static final String PROP_CHECK_ACCESSIBLE = "io.netty.buffer.checkAccessible";
-    static final boolean checkAccessible; // accessed from CompositeByteBuf
+
+    // 是否进行可访问性检查的标志，从CompositeByteBuf中访问
+    static final boolean checkAccessible;
+
+    // 边界检查属性名
     private static final String PROP_CHECK_BOUNDS = "io.netty.buffer.checkBounds";
+
+    // 是否进行边界检查的标志
     private static final boolean checkBounds;
 
+    // 静态初始化块，用于初始化检查标志
+    // question: 为什么用户需要手动设置checkAccessible?
+    /*
+     * answser:
+     * 总结设置checkAccessible的原因：
+     * 性能优化：关闭检查可以提升性能
+     * 环境适配：不同环境可能需要不同的配置
+     * 特殊需求：某些场景下用户完全控制ByteBuf使用
+     * 调试便利：开发测试时可能需要关闭检查
+     * 生产调优：根据实际负载调整配置
+     */
+    /*
+     * question: checkAccessible的作用是什么?
+     * answser:
+     * --------------------------------
+     * 安全性保证---
+     * 防止访问已释放的缓冲区
+     * 避免内存泄漏
+     * 确保多线程安全
+     * 资源管理---
+     * 帮助正确管理ByteBuf的生命周期
+     * 确保资源及时释放
+     * 防止资源泄露
+     * 调试支持---
+     * 帮助发现潜在问题
+     * 提供清晰的错误信息
+     * 便于问题定位
+     * 性能考虑---
+     * 可以通过配置关闭检查
+     * 在高性能场景下优化
+     * 平衡安全性和性能
+     * 最佳实践---
+     * 开发环境建议开启
+     * 生产环境根据需求配置
+     * 确保代码质量
+     */
     static {
+        // 优先检查新版本的属性名，如果存在则使用新版本
         if (SystemPropertyUtil.contains(PROP_CHECK_ACCESSIBLE)) {
             checkAccessible = SystemPropertyUtil.getBoolean(PROP_CHECK_ACCESSIBLE, true);
         } else {
+            // 如果新版本不存在，则使用旧版本的属性名
             checkAccessible = SystemPropertyUtil.getBoolean(LEGACY_PROP_CHECK_ACCESSIBLE, true);
         }
+
+        // 初始化边界检查标志
         checkBounds = SystemPropertyUtil.getBoolean(PROP_CHECK_BOUNDS, true);
+
+        // 如果日志级别为DEBUG，则输出配置信息
         if (logger.isDebugEnabled()) {
             logger.debug("-D{}: {}", PROP_CHECK_ACCESSIBLE, checkAccessible);
             logger.debug("-D{}: {}", PROP_CHECK_BOUNDS, checkBounds);
         }
     }
 
-    static final ResourceLeakDetector<ByteBuf> leakDetector =
-            ResourceLeakDetectorFactory.instance().newResourceLeakDetector(ByteBuf.class);
+    // 创建ByteBuf的资源泄漏检测器实例
+    static final ResourceLeakDetector<ByteBuf> leakDetector = ResourceLeakDetectorFactory.instance()
+            .newResourceLeakDetector(ByteBuf.class);
 
+    // 读索引位置
     int readerIndex;
+
+    // 写索引位置
     int writerIndex;
+
+    // 标记的读索引位置（用于临时保存读位置）
+    // tags: 优化
     private int markedReaderIndex;
+
+    // 标记的写索引位置（用于临时保存写位置）
+    // tags: 优化
     private int markedWriterIndex;
+
+    // 最大容量限制
     private int maxCapacity;
 
     protected AbstractByteBuf(int maxCapacity) {
@@ -214,42 +278,78 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf discardReadBytes() {
+        // 如果读索引为0，说明没有可丢弃的数据
         if (readerIndex == 0) {
+            // 仅检查缓冲区是否可访问（引用计数>0）
             ensureAccessible();
+            // 直接返回当前缓冲区，不做任何操作
             return this;
         }
 
+        // 如果读索引不等于写索引，说明缓冲区中还有未读数据
         if (readerIndex != writerIndex) {
+            // 将未读数据（从readerIndex到writerIndex）移动到缓冲区起始位置（索引0）
+            // 实际上是执行内存搬移操作，将未读数据前移
             setBytes(0, this, readerIndex, writerIndex - readerIndex);
+
+            // 更新写索引，减去已丢弃的字节数量
+            // 新的写索引 = 原写索引 - 读索引（丢弃的字节数）
             writerIndex -= readerIndex;
+
+            // 调整标记位置，因为内存位置已经改变
+            // 用于更新markReaderIndex和markWriterIndex
             adjustMarkers(readerIndex);
+
+            // 将读索引重置为0，表示从缓冲区开始位置开始读取
             readerIndex = 0;
         } else {
+            // 如果读索引等于写索引，说明所有数据都已被读取
+            // 仅检查缓冲区是否可访问
             ensureAccessible();
+
+            // 调整标记位置
             adjustMarkers(readerIndex);
+
+            // 将读写索引都重置为0，相当于清空缓冲区
             writerIndex = readerIndex = 0;
         }
+
+        // 返回当前缓冲区，支持方法链式调用
         return this;
     }
 
     @Override
     public ByteBuf discardSomeReadBytes() {
+        // 如果读索引大于0，说明有已读数据可以被丢弃
         if (readerIndex > 0) {
+            // 如果读索引等于写索引，表示所有数据都已被读取
             if (readerIndex == writerIndex) {
+                // 确保缓冲区可访问（引用计数>0）
                 ensureAccessible();
+                // 调整标记位置，以适应索引的变化
                 adjustMarkers(readerIndex);
+                // 将读写索引都重置为0，相当于清空缓冲区
                 writerIndex = readerIndex = 0;
                 return this;
             }
 
-            if (readerIndex >= capacity() >>> 1) {
+            // 只有当读索引超过缓冲区容量的一半时，才执行内存压缩操作
+            // 这是一个优化策略，避免频繁的内存复制
+            if (readerIndex >= capacity() >>> 1) { // ">>> 1"相当于除以2
+                // 将未读数据（从readerIndex到writerIndex）移动到缓冲区起始位置（索引0）
                 setBytes(0, this, readerIndex, writerIndex - readerIndex);
+                // 更新写索引，减去已丢弃的字节数量
                 writerIndex -= readerIndex;
+                // 调整标记位置，以适应内存布局的变化
                 adjustMarkers(readerIndex);
+                // 将读索引重置为0，表示从缓冲区开始位置读取
                 readerIndex = 0;
                 return this;
             }
         }
+
+        // 如果没有可丢弃的数据（readerIndex=0）或者读索引未超过容量一半，
+        // 则仅检查缓冲区可访问性，不做任何内存操作
         ensureAccessible();
         return this;
     }
@@ -281,56 +381,100 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return this;
     }
 
+    /**
+     * 确保ByteBuf有足够的可写空间，必要时进行容量扩展
+     * 这是一个内部方法，被public的ensureWritable方法调用
+     */
     final void ensureWritable0(int minWritableBytes) {
+        // 获取当前写索引位置
         final int writerIndex = writerIndex();
+
+        // 计算需要的目标容量 = 当前写索引 + 最小可写字节数
         final int targetCapacity = writerIndex + minWritableBytes;
-        // using non-short-circuit & to reduce branching - this is a hot path and targetCapacity should rarely overflow
+
+        // 检查目标容量是否合法（非负）且在当前容量范围内
+        // 注意：这里使用非短路与(&)而不是短路与(&&)来减少分支预测失败
+        // 这是性能优化的一种手段，因为这是热点路径，且targetCapacity很少溢出
         if (targetCapacity >= 0 & targetCapacity <= capacity()) {
+            // 如果目标容量合法且在当前容量范围内，只需确保缓冲区可访问（引用计数>0）
             ensureAccessible();
             return;
         }
+
+        // 如果启用了边界检查，且目标容量非法（负数或超过最大容量）
         if (checkBounds && (targetCapacity < 0 || targetCapacity > maxCapacity)) {
+            // 确保缓冲区可访问
             ensureAccessible();
+            // 抛出索引越界异常，提供详细错误信息
             throw new IndexOutOfBoundsException(String.format(
                     "writerIndex(%d) + minWritableBytes(%d) exceeds maxCapacity(%d): %s",
                     writerIndex, minWritableBytes, maxCapacity, this));
         }
 
-        // Normalize the target capacity to the power of 2.
+        // 计算新的容量
+        // 首先获取快速可写字节数（不需要内存复制的可写空间）
+        //
         final int fastWritable = maxFastWritableBytes();
+
+        // 决定新容量
+        // 1. 如果快速可写空间足够，直接使用当前写索引+快速可写空间
+        // 2. 否则，通过分配器计算合适的新容量，考虑目标容量和最大容量
         int newCapacity = fastWritable >= minWritableBytes ? writerIndex + fastWritable
                 : alloc().calculateNewCapacity(targetCapacity, maxCapacity);
 
-        // Adjust to the new capacity.
+        // 调整缓冲区到新容量
+        // 这可能涉及内存重新分配和数据复制
         capacity(newCapacity);
     }
 
     @Override
     public int ensureWritable(int minWritableBytes, boolean force) {
+        // 确保缓冲区可访问（引用计数>0）
         ensureAccessible();
+
+        // 检查minWritableBytes参数是否为非负数，否则抛出异常
         checkPositiveOrZero(minWritableBytes, "minWritableBytes");
 
+        // 如果当前可写字节数已经足够，直接返回0（表示无需扩容）
         if (minWritableBytes <= writableBytes()) {
             return 0;
         }
 
+        // 获取最大容量限制
         final int maxCapacity = maxCapacity();
+
+        // 获取当前写索引位置
         final int writerIndex = writerIndex();
+
+        // 如果需要的可写空间超过了从当前写索引到最大容量的剩余空间
         if (minWritableBytes > maxCapacity - writerIndex) {
+            // 如果不强制扩容或者当前容量已经达到最大容量
             if (!force || capacity() == maxCapacity) {
+                // 返回1，表示无法满足扩容请求
                 return 1;
             }
 
+            // 强制扩容到最大容量
             capacity(maxCapacity);
+
+            // 返回3，表示已扩容到最大容量，但仍无法满足完整需求
             return 3;
         }
 
+        // 获取快速可写字节数（不需要内存复制的可写空间）
         int fastWritable = maxFastWritableBytes();
+
+        // 计算新容量：
+        // 1. 如果快速可写空间足够，直接使用当前写索引+快速可写空间
+        // 2. 否则，通过分配器计算合适的新容量，考虑目标容量和最大容量
         int newCapacity = fastWritable >= minWritableBytes ? writerIndex + fastWritable
                 : alloc().calculateNewCapacity(writerIndex + minWritableBytes, maxCapacity);
 
-        // Adjust to the new capacity.
+        // 调整缓冲区到新容量
+        // 这可能涉及内存重新分配和数据复制
         capacity(newCapacity);
+
+        // 返回2，表示扩容成功，且满足需求
         return 2;
     }
 
@@ -507,7 +651,8 @@ public abstract class AbstractByteBuf extends ByteBuf {
     @Override
     public CharSequence getCharSequence(int index, int length, Charset charset) {
         if (CharsetUtil.US_ASCII.equals(charset) || CharsetUtil.ISO_8859_1.equals(charset)) {
-            // ByteBufUtil.getBytes(...) will return a new copy which the AsciiString uses directly
+            // ByteBufUtil.getBytes(...) will return a new copy which the AsciiString uses
+            // directly
             return new AsciiString(ByteBufUtil.getBytes(this, index, length, true), false);
         }
         return toString(index, length, charset);
@@ -531,7 +676,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf setBoolean(int index, boolean value) {
-        setByte(index, value? 1 : 0);
+        setByte(index, value ? 1 : 0);
         return this;
     }
 
@@ -646,14 +791,31 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
     @Override
     public ByteBuf setBytes(int index, ByteBuf src, int length) {
+        // 检查目标位置index和长度length是否在有效范围内
+        // 如果超出范围会抛出IndexOutOfBoundsException
         checkIndex(index, length);
+
+        // 检查源ByteBuf是否为null
+        // 如果为null会抛出NullPointerException
         ObjectUtil.checkNotNull(src, "src");
+
+        // 如果启用了边界检查
         if (checkBounds) {
+            // 检查源ByteBuf是否有足够的可读字节
+            // 如果可读字节数小于length会抛出IndexOutOfBoundsException
             checkReadableBounds(src, length);
         }
 
+        // 执行实际的字节复制操作
+        // 从源ByteBuf的readerIndex位置开始，复制length个字节
+        // 到目标ByteBuf的index位置
         setBytes(index, src, src.readerIndex(), length);
+
+        // 更新源ByteBuf的读索引，向后移动length个位置
+        // 这表示这些字节已经被读取和复制
         src.readerIndex(src.readerIndex() + length);
+
+        // 返回当前ByteBuf实例，支持链式调用
         return this;
     }
 
@@ -667,7 +829,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
         int nLong = length >>> 3;
         int nBytes = length & 7;
-        for (int i = nLong; i > 0; i --) {
+        for (int i = nLong; i > 0; i--) {
             _setLong(index, 0);
             index += 8;
         }
@@ -675,16 +837,16 @@ public abstract class AbstractByteBuf extends ByteBuf {
             _setInt(index, 0);
             // Not need to update the index as we not will use it after this.
         } else if (nBytes < 4) {
-            for (int i = nBytes; i > 0; i --) {
+            for (int i = nBytes; i > 0; i--) {
                 _setByte(index, 0);
-                index ++;
+                index++;
             }
         } else {
             _setInt(index, 0);
             index += 4;
-            for (int i = nBytes - 4; i > 0; i --) {
+            for (int i = nBytes - 4; i > 0; i--) {
                 _setByte(index, 0);
-                index ++;
+                index++;
             }
         }
         return this;
@@ -695,33 +857,70 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return setCharSequence0(index, sequence, charset, false);
     }
 
+    /**
+     * 将字符序列写入ByteBuf的指定位置
+     * 
+     * @param index    写入的起始位置
+     * @param sequence 要写入的字符序列
+     * @param charset  字符编码
+     * @param expand   是否允许自动扩容
+     * @return 写入的字节数
+     * 
+     * @throws IndexOutOfBoundsException 如果index小于0或写入位置超出缓冲区容量
+     * @throws IllegalArgumentException  如果字符序列为null
+     */
     private int setCharSequence0(int index, CharSequence sequence, Charset charset, boolean expand) {
+        // 针对UTF-8编码的特殊优化处理
         if (charset.equals(CharsetUtil.UTF_8)) {
+            // 计算UTF-8编码下可能的最大字节数
             int length = ByteBufUtil.utf8MaxBytes(sequence);
+
+            // 根据是否需要扩容进行不同的索引检查
             if (expand) {
+                // 确保有足够的可写空间
                 ensureWritable0(length);
+                // 检查索引是否在有效范围内
                 checkIndex0(index, length);
             } else {
+                // 不扩容时检查索引
                 checkIndex(index, length);
             }
+            // 使用优化的UTF-8写入方法
             return ByteBufUtil.writeUtf8(this, index, length, sequence, sequence.length());
         }
+
+        // 针对ASCII和ISO-8859-1编码的特殊优化处理
         if (charset.equals(CharsetUtil.US_ASCII) || charset.equals(CharsetUtil.ISO_8859_1)) {
+            // 对于单字节编码，长度等于字符序列长度
             int length = sequence.length();
+
+            // 根据是否需要扩容进行不同的索引检查
             if (expand) {
+                // 确保有足够的可写空间
                 ensureWritable0(length);
+                // 检查索引是否在有效范围内
                 checkIndex0(index, length);
             } else {
+                // 不扩容时检查索引
                 checkIndex(index, length);
             }
+            // 使用优化的ASCII写入方法
             return ByteBufUtil.writeAscii(this, index, sequence, length);
         }
+
+        // 对于其他编码，使用通用的转换方法
+        // 将字符序列转换为字节数组
         byte[] bytes = sequence.toString().getBytes(charset);
+
+        // 如果需要扩容，确保有足够的空间
         if (expand) {
             ensureWritable0(bytes.length);
-            // setBytes(...) will take care of checking the indices.
+            // setBytes方法会处理索引检查
         }
+
+        // 写入字节数组
         setBytes(index, bytes);
+        // 返回写入的字节数
         return bytes.length;
     }
 
@@ -1158,7 +1357,7 @@ public abstract class AbstractByteBuf extends ByteBuf {
 
         int nLong = length >>> 3;
         int nBytes = length & 7;
-        for (int i = nLong; i > 0; i --) {
+        for (int i = nLong; i > 0; i--) {
             _setLong(wIndex, 0);
             wIndex += 8;
         }
@@ -1166,14 +1365,14 @@ public abstract class AbstractByteBuf extends ByteBuf {
             _setInt(wIndex, 0);
             wIndex += 4;
         } else if (nBytes < 4) {
-            for (int i = nBytes; i > 0; i --) {
+            for (int i = nBytes; i > 0; i--) {
                 _setByte(wIndex, 0);
                 wIndex++;
             }
         } else {
             _setInt(wIndex, 0);
             wIndex += 4;
-            for (int i = nBytes - 4; i > 0; i --) {
+            for (int i = nBytes - 4; i > 0; i--) {
                 _setByte(wIndex, 0);
                 wIndex++;
             }
@@ -1359,10 +1558,10 @@ public abstract class AbstractByteBuf extends ByteBuf {
         }
 
         StringBuilder buf = new StringBuilder()
-            .append(StringUtil.simpleClassName(this))
-            .append("(ridx: ").append(readerIndex)
-            .append(", widx: ").append(writerIndex)
-            .append(", cap: ").append(capacity());
+                .append(StringUtil.simpleClassName(this))
+                .append("(ridx: ").append(readerIndex)
+                .append(", widx: ").append(writerIndex)
+                .append(", cap: ").append(capacity());
         if (maxCapacity != Integer.MAX_VALUE) {
             buf.append('/').append(maxCapacity);
         }
@@ -1446,7 +1645,8 @@ public abstract class AbstractByteBuf extends ByteBuf {
     }
 
     /**
-     * Should be called by every method that tries to access the buffers content to check
+     * Should be called by every method that tries to access the buffers content to
+     * check
      * if the buffer was released before.
      */
     protected final void ensureAccessible() {
