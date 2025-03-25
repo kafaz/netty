@@ -26,51 +26,61 @@ import io.netty.channel.SimpleChannelInboundHandler;
  */
 public class DiscardClientHandler extends SimpleChannelInboundHandler<Object> {
 
-    private ByteBuf content;
-    private ChannelHandlerContext ctx;
+    private ByteBuf content; // 用于存储发送到服务器的数据缓冲区
+    private ChannelHandlerContext ctx; // 保存通道处理上下文以便后续使用
 
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
+        // 当与服务器的连接建立完成后调用此方法
         this.ctx = ctx;
 
-        // Initialize the message.
+        // 初始化消息内容：创建指定大小的直接内存缓冲区并填充0值
+        // directBuffer创建的是堆外内存，避免了JVM堆内存与native内存之间的数据拷贝，提高性能
         content = ctx.alloc().directBuffer(DiscardClient.SIZE).writeZero(DiscardClient.SIZE);
 
-        // Send the initial messages.
+        // 连接建立后立即开始发送数据，触发客户端向服务器发送流量
         generateTraffic();
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
+        // 当与服务器的连接断开时调用此方法
+        // 释放之前分配的ByteBuf资源，防止内存泄漏
         content.release();
     }
 
     @Override
     public void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
-        // Server is supposed to send nothing, but if it sends something, discard it.
+        // 当从服务器接收到消息时调用此方法
+        // 在丢弃协议中，服务器不应发送任何数据，但如果接收到也会被忽略
     }
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        // Close the connection when an exception is raised.
+        // 当处理过程中发生异常时调用
+        // 打印异常栈信息并关闭连接
         cause.printStackTrace();
         ctx.close();
     }
 
-    long counter;
+    long counter; // 可用于统计已发送的消息数量（当前未使用）
 
     private void generateTraffic() {
-        // Flush the outbound buffer to the socket.
-        // Once flushed, generate the same amount of traffic again.
+        // 生成网络流量的核心方法
+        // 将缓冲区内容写入并刷新到网络中，同时保留原缓冲区内容以便重复使用
+        // retainedDuplicate()创建缓冲区的复制并增加引用计数，防止被释放
         ctx.writeAndFlush(content.retainedDuplicate()).addListener(trafficGenerator);
     }
 
     private final ChannelFutureListener trafficGenerator = new ChannelFutureListener() {
         @Override
         public void operationComplete(ChannelFuture future) {
+            // 当数据发送操作完成时触发此监听器
             if (future.isSuccess()) {
+                // 如果发送成功，则继续发送更多数据，形成连续不断的流量
                 generateTraffic();
             } else {
+                // 如果发送失败，打印异常并关闭连接
                 future.cause().printStackTrace();
                 future.channel().close();
             }
