@@ -35,28 +35,42 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Netty中的池化ByteBuf分配器实现类
+ * 该类负责管理和分配池化的ByteBuf,通过精细的内存管理提升性能和减少内存碎片
+ */
 public class PooledByteBufAllocator extends AbstractByteBufAllocator implements ByteBufAllocatorMetricProvider {
 
+    // 日志记录器
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PooledByteBufAllocator.class);
-    private static final int DEFAULT_NUM_HEAP_ARENA;
-    private static final int DEFAULT_NUM_DIRECT_ARENA;
-
-    private static final int DEFAULT_PAGE_SIZE;
-    private static final int DEFAULT_MAX_ORDER; // 8192 << 9 = 4 MiB per chunk
-    private static final int DEFAULT_SMALL_CACHE_SIZE;
-    private static final int DEFAULT_NORMAL_CACHE_SIZE;
-    static final int DEFAULT_MAX_CACHED_BUFFER_CAPACITY;
-    private static final int DEFAULT_CACHE_TRIM_INTERVAL;
-    private static final long DEFAULT_CACHE_TRIM_INTERVAL_MILLIS;
-    private static final boolean DEFAULT_USE_CACHE_FOR_ALL_THREADS;
-    private static final int DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT;
-    static final int DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK;
+    
+    // 堆内存和直接内存arena数量的默认值
+    private static final int DEFAULT_NUM_HEAP_ARENA;      // 堆内存arena默认数量
+    private static final int DEFAULT_NUM_DIRECT_ARENA;    // 直接内存arena默认数量
+    
+    // 内存分配的关键参数
+    private static final int DEFAULT_PAGE_SIZE;           // 默认页大小
+    private static final int DEFAULT_MAX_ORDER;           // 默认最大order,决定chunk大小(8192 << 9 = 4 MB/chunk)
+    private static final int DEFAULT_SMALL_CACHE_SIZE;    // 小缓存大小
+    private static final int DEFAULT_NORMAL_CACHE_SIZE;   // 普通缓存大小
+    static final int DEFAULT_MAX_CACHED_BUFFER_CAPACITY;  // 最大可缓存的buffer容量
+    
+    // 缓存维护相关参数
+    private static final int DEFAULT_CACHE_TRIM_INTERVAL;      // 缓存清理间隔
+    private static final long DEFAULT_CACHE_TRIM_INTERVAL_MILLIS; // 缓存清理间隔(毫秒)
+    private static final boolean DEFAULT_USE_CACHE_FOR_ALL_THREADS; // 是否为所有线程启用缓存
+    
+    // 内存对齐相关参数
+    private static final int DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT; // 直接内存缓存对齐
+    static final int DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK;     // 每个chunk最大缓存的ByteBuf数量
+    
+    // 快速线程本地变量的终结器缓存禁用标志
     private static final boolean DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS;
-
-    private static final int MIN_PAGE_SIZE = 4096;
-    private static final int MAX_CHUNK_SIZE = (int) (((long) Integer.MAX_VALUE + 1) / 2);
-
-    private static final int CACHE_NOT_USED = 0;
+    
+    // 关键常量
+    private static final int MIN_PAGE_SIZE = 4096;        // 最小页大小(4KB)
+    private static final int MAX_CHUNK_SIZE = (int) (((long) Integer.MAX_VALUE + 1) / 2); // 最大chunk大小
+    private static final int CACHE_NOT_USED = 0;          // 缓存未使用标记
 
     private final Runnable trimTask = new Runnable() {
         @Override

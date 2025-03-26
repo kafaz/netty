@@ -20,11 +20,16 @@ import static io.netty.util.ByteProcessorUtils.LINE_FEED;
 import static io.netty.util.ByteProcessorUtils.SPACE;
 
 /**
- * Provides a mechanism to iterate over a collection of bytes.
+ * 提供遍历和处理字节集合的函数式接口
  */
+@FunctionalInterface
 public interface ByteProcessor {
     /**
-     * A {@link ByteProcessor} which finds the first appearance of a specific byte.
+     * 包含查找特定字节的处理器实现
+     * IndexOfProcessor 的常见应用:
+     *  查找特定分隔符（如逗号、分号、换行符）
+     *  查找消息边界标记
+     *  定位特定控制字符（如 NULL 终止符）
      */
     class IndexOfProcessor implements ByteProcessor {
         private final byte byteToFind;
@@ -40,7 +45,11 @@ public interface ByteProcessor {
     }
 
     /**
-     * A {@link ByteProcessor} which finds the first appearance which is not of a specific byte.
+     * 包含查找非特定字节的处理器实现
+     * IndexNotOfProcessor 的常见应用:
+     *  跳过前导空白字符，找到内容的实际开始
+     *  跳过一系列相同的填充字节
+     *  在解析文本时，找到非空白字符的位置
      */
     class IndexNotOfProcessor implements ByteProcessor {
         private final byte byteToNotFind;
@@ -56,93 +65,76 @@ public interface ByteProcessor {
     }
 
     /**
-     * Aborts on a {@code NUL (0x00)}.
+     * 查找NULL字节(0x00)
      */
-    ByteProcessor FIND_NUL = new IndexOfProcessor((byte) 0);
+    ByteProcessor FIND_NUL = value -> value != 0;
 
     /**
-     * Aborts on a non-{@code NUL (0x00)}.
+     * 查找非NULL字节
      */
-    ByteProcessor FIND_NON_NUL = new IndexNotOfProcessor((byte) 0);
+    ByteProcessor FIND_NON_NUL = value -> value == 0;
 
     /**
-     * Aborts on a {@code CR ('\r')}.
+     * 查找回车符('\r')
      */
-    ByteProcessor FIND_CR = new IndexOfProcessor(CARRIAGE_RETURN);
+    ByteProcessor FIND_CR = value -> value != CARRIAGE_RETURN;
 
     /**
-     * Aborts on a non-{@code CR ('\r')}.
+     * 查找非回车符
      */
-    ByteProcessor FIND_NON_CR = new IndexNotOfProcessor(CARRIAGE_RETURN);
+    ByteProcessor FIND_NON_CR = value -> value == CARRIAGE_RETURN;
 
     /**
-     * Aborts on a {@code LF ('\n')}.
+     * 查找换行符('\n')
      */
-    ByteProcessor FIND_LF = new IndexOfProcessor(LINE_FEED);
+    ByteProcessor FIND_LF = value -> value != LINE_FEED;
 
     /**
-     * Aborts on a non-{@code LF ('\n')}.
+     * 查找非换行符
      */
-    ByteProcessor FIND_NON_LF = new IndexNotOfProcessor(LINE_FEED);
+    ByteProcessor FIND_NON_LF = value -> value == LINE_FEED;
 
     /**
-     * Aborts on a semicolon {@code (';')}.
+     * 查找分号(';')
      */
-    ByteProcessor FIND_SEMI_COLON = new IndexOfProcessor((byte) ';');
+    ByteProcessor FIND_SEMI_COLON = value -> value != ';';
 
     /**
-     * Aborts on a comma {@code (',')}.
+     * 查找逗号(',')
      */
-    ByteProcessor FIND_COMMA = new IndexOfProcessor((byte) ',');
+    ByteProcessor FIND_COMMA = value -> value != ',';
 
     /**
-     * Aborts on a ascii space character ({@code ' '}).
+     * 查找ASCII空格字符(' ')
      */
-    ByteProcessor FIND_ASCII_SPACE = new IndexOfProcessor(SPACE);
+    ByteProcessor FIND_ASCII_SPACE = value -> value != SPACE;
 
     /**
-     * Aborts on a {@code CR ('\r')} or a {@code LF ('\n')}.
+     * 查找回车符或换行符
      */
-    ByteProcessor FIND_CRLF = new ByteProcessor() {
-        @Override
-        public boolean process(byte value) {
-            return value != CARRIAGE_RETURN && value != LINE_FEED;
-        }
-    };
+    ByteProcessor FIND_CRLF = value -> value != CARRIAGE_RETURN && value != LINE_FEED;
 
     /**
-     * Aborts on a byte which is neither a {@code CR ('\r')} nor a {@code LF ('\n')}.
+     * 查找非回车符和非换行符
      */
-    ByteProcessor FIND_NON_CRLF = new ByteProcessor() {
-        @Override
-        public boolean process(byte value) {
-            return value == CARRIAGE_RETURN || value == LINE_FEED;
-        }
-    };
+    ByteProcessor FIND_NON_CRLF = value -> value == CARRIAGE_RETURN || value == LINE_FEED;
 
     /**
-     * Aborts on a linear whitespace (a ({@code ' '} or a {@code '\t'}).
+     * 查找空白字符(空格或制表符)
      */
-    ByteProcessor FIND_LINEAR_WHITESPACE = new ByteProcessor() {
-        @Override
-        public boolean process(byte value) {
-            return value != SPACE && value != HTAB;
-        }
-    };
+    ByteProcessor FIND_LINEAR_WHITESPACE = value -> value != SPACE && value != HTAB;
 
     /**
-     * Aborts on a byte which is not a linear whitespace (neither {@code ' '} nor {@code '\t'}).
+     * 查找非空白字符
      */
-    ByteProcessor FIND_NON_LINEAR_WHITESPACE = new ByteProcessor() {
-        @Override
-        public boolean process(byte value) {
-            return value == SPACE || value == HTAB;
-        }
-    };
+    ByteProcessor FIND_NON_LINEAR_WHITESPACE = value -> value == SPACE || value == HTAB;
 
     /**
-     * @return {@code true} if the processor wants to continue the loop and handle the next byte in the buffer.
-     *         {@code false} if the processor wants to stop handling bytes and abort the loop.
+     * 处理单个字节的方法
+     * 
+     * @param value 要处理的字节值
+     * @return true表示继续处理下一个字节，false表示停止处理
+     * @throws Exception 处理过程中可能抛出的异常
      */
     boolean process(byte value) throws Exception;
 }

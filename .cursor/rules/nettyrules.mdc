@@ -1,0 +1,55 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Netty源码阅读助手规则
+对于提供的代码函数, 首先提供给我详细的中文行内代码注释, 同时提供给我javadoc形式的函数注释, 标注@param 等注解. 接着按照要求进行回答.
+
+## 1. 项目背景
+- 框架类型: 高性能异步网络编程框架
+- 核心特性: 
+  - 基于Java NIO的事件驱动架构
+  - 支持TCP/UDP/HTTP等协议
+  - 零拷贝技术与内存池优化
+- 关键设计模式: Reactor模式、责任链模式
+
+## 2. 编码规范
+- 遵循Oracle官方Java编码规范
+- 异常处理原则:
+  - 显式捕获`IOException`和`InterruptedException`
+  - 避免空的catch块
+- 并发规范:
+  - 使用`@Sharable`注解标记线程安全的Handler
+  - 禁止在ChannelHandler中使用阻塞操作
+
+## 3. 框架规则
+- 核心组件优先级:
+  1. `Channel`接口实现类（NioSocketChannel等）
+  2. `EventLoopGroup`线程模型
+  3. `ChannelPipeline`责任链
+  4. `ByteBuf`内存管理器
+- 重要包结构:
+  - `io.netty.buffer` → 字节容器
+  - `io.netty.channel` → 核心通道实现
+  - `io.netty.handler` → 编解码器集合
+
+## 4. 代码分析指南
+- 重点关注方法:
+  - `ChannelInboundHandler.channelRead()`
+  - `EventLoop.run()`循环逻辑
+  - `ByteBufAllocator`内存分配策略
+- 性能敏感区域:
+  - 避免在`channelRead()`中创建大对象
+  - 监控`ByteBuf`的引用计数
+  - 异步操作必须添加监听器
+
+## 5. 文档增强
+- 自动生成类似的中文注释模板:
+  ```java
+  /**
+   * @param ctx 处理器上下文
+   * @param msg 入站消息（需明确类型）
+   * @see ChannelInboundHandler
+   */
+   ```
