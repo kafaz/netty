@@ -263,7 +263,7 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, 
      *
      * @deprecated use the Little Endian accessors, e.g. {@code getShortLE},
      *             {@code getIntLE}
-     *             instead of creating a buffer with swapped {@code endianness}.
+     *             instead of creating a buffer with swapped {@code e7668ndianness}.
      */
     @Deprecated
     public abstract ByteOrder order();
@@ -289,10 +289,10 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, 
     public abstract ByteBuf order(ByteOrder endianness);
 
     /**
-     * Return the underlying buffer instance if this buffer is a wrapper of another
-     * buffer.
-     *
-     * @return {@code null} if this buffer is not a wrapper
+     * unwrap方法 - 获取被包装缓冲区的底层缓冲区
+     * 
+     * @return 如果当前缓冲区是包装缓冲区，则返回底层缓冲区实例；
+     *         如果不是包装缓冲区，则返回null
      */
     public abstract ByteBuf unwrap();
 
@@ -2552,21 +2552,21 @@ public abstract class ByteBuf implements ReferenceCounted, Comparable<ByteBuf>, 
     public abstract ByteBuffer nioBuffer();
 
     /**
-    * 将此缓冲区的子区域暴露为NIO {@link ByteBuffer}。
-    * 返回的缓冲区要么共享，要么包含此缓冲区内容的副本。
-    * 更改返回的NIO缓冲区的位置和限制不会影响此缓冲区的索引和标记。
-    * 此方法不会修改此缓冲区的{@code readerIndex}或{@code writerIndex}。
-    * 请注意，如果此缓冲区是动态缓冲区并且调整了其容量，
-    * 则返回的NIO缓冲区将不会看到此缓冲区的更改。
-    *
-    * @throws UnsupportedOperationException
-    *                                       如果此缓冲区无法创建一个与自身共享内容的
-    *                                       {@link ByteBuffer}
-    *
-    * @see #nioBufferCount()
-    * @see #nioBuffers()
-    * @see #nioBuffers(int, int)
-    */
+     * 将此缓冲区的子区域暴露为NIO {@link ByteBuffer}。
+     * 返回的缓冲区要么共享，要么包含此缓冲区内容的副本。
+     * 更改返回的NIO缓冲区的位置和限制不会影响此缓冲区的索引和标记。
+     * 此方法不会修改此缓冲区的{@code readerIndex}或{@code writerIndex}。
+     * 请注意，如果此缓冲区是动态缓冲区并且调整了其容量，
+     * 则返回的NIO缓冲区将不会看到此缓冲区的更改。
+     *
+     * @throws UnsupportedOperationException
+     *                                       如果此缓冲区无法创建一个与自身共享内容的
+     *                                       {@link ByteBuffer}
+     *
+     * @see #nioBufferCount()
+     * @see #nioBuffers()
+     * @see #nioBuffers(int, int)
+     */
     public abstract ByteBuffer nioBuffer(int index, int length);
 
     /**

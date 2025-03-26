@@ -318,38 +318,45 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return this;
     }
 
+    /**
+     * ByteBuf内存优化方法 - 丢弃部分已读字节
+     * 
+     * @功能说明:
+     *        - 释放已读取数据占用的内存空间
+     *        - 仅在合适时机执行内存压缩,避免频繁操作
+     *        - 保持未读数据的完整性
+     * 
+     * @实现细节:
+     *        1. 判断是否有可丢弃数据
+     *        2. 根据不同场景采取对应策略
+     *        3. 必要时进行内存压缩
+     * 
+     * @返回值: 当前ByteBuf实例,支持链式调用
+     */
     @Override
     public ByteBuf discardSomeReadBytes() {
-        // 如果读索引大于0，说明有已读数据可以被丢弃
+        // 场景1: 检查是否有已读数据可以丢弃
         if (readerIndex > 0) {
-            // 如果读索引等于写索引，表示所有数据都已被读取
+
+            // 场景2: 所有数据都已读完
             if (readerIndex == writerIndex) {
-                // 确保缓冲区可访问（引用计数>0）
-                ensureAccessible();
-                // 调整标记位置，以适应索引的变化
-                adjustMarkers(readerIndex);
-                // 将读写索引都重置为0，相当于清空缓冲区
-                writerIndex = readerIndex = 0;
+                ensureAccessible(); // 确保缓冲区可用
+                adjustMarkers(readerIndex); // 调整标记位置
+                writerIndex = readerIndex = 0; // 重置索引
                 return this;
             }
 
-            // 只有当读索引超过缓冲区容量的一半时，才执行内存压缩操作
-            // 这是一个优化策略，避免频繁的内存复制
-            if (readerIndex >= capacity() >>> 1) { // ">>> 1"相当于除以2
-                // 将未读数据（从readerIndex到writerIndex）移动到缓冲区起始位置（索引0）
+            // 场景3: 已读数据超过容量一半时才压缩
+            if (readerIndex >= capacity() >>> 1) {
+                // 将未读数据移到开始位置
                 setBytes(0, this, readerIndex, writerIndex - readerIndex);
-                // 更新写索引，减去已丢弃的字节数量
-                writerIndex -= readerIndex;
-                // 调整标记位置，以适应内存布局的变化
-                adjustMarkers(readerIndex);
-                // 将读索引重置为0，表示从缓冲区开始位置读取
-                readerIndex = 0;
+                writerIndex -= readerIndex; // 调整写位置
+                adjustMarkers(readerIndex); // 调整标记
+                readerIndex = 0; // 重置读位置
                 return this;
             }
         }
 
-        // 如果没有可丢弃的数据（readerIndex=0）或者读索引未超过容量一半，
-        // 则仅检查缓冲区可访问性，不做任何内存操作
         ensureAccessible();
         return this;
     }
@@ -572,9 +579,21 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return value;
     }
 
+    /**
+     * 从ByteBuf的指定位置读取一个int值
+     *
+     * @param index 要读取的起始位置
+     * @return 读取到的int值
+     * @throws IndexOutOfBoundsException 如果index超出有效范围
+     */
     @Override
     public int getInt(int index) {
+        // 1. 检查索引的有效性
+        // 参数4表示int类型占用4个字节
         checkIndex(index, 4);
+
+        // 2. 调用具体实现类的方法读取int值
+        // _getInt是一个抽象方法，由具体的ByteBuf实现类提供实现
         return _getInt(index);
     }
 
@@ -1430,8 +1449,21 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return nioBuffer(readerIndex, readableBytes());
     }
 
+    /**
+     * 获取ByteBuf的底层NIO ByteBuffer数组
+     * 
+     * @return 返回当前ByteBuf可读部分对应的ByteBuffer数组
+     * 
+     * @功能说明:
+     *        1. 将Netty的ByteBuf转换为Java NIO的ByteBuffer数组
+     *        2. 默认只转换当前可读部分(readerIndex到writerIndex之间的数据)
+     *        3. 支持复合缓冲区(CompositeByteBuf)的情况
+     */
     @Override
     public ByteBuffer[] nioBuffers() {
+        // 调用重载方法,指定要转换的范围
+        // readerIndex(): 获取当前读索引位置
+        // readableBytes(): 获取当前可读字节数
         return nioBuffers(readerIndex, readableBytes());
     }
 
@@ -1453,8 +1485,26 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return ByteBufUtil.lastIndexOf(this, fromIndex, toIndex, value);
     }
 
+    /**
+     * 查找指定字节值在ByteBuf中的相对位置
+     * 
+     * @param value 要查找的字节值
+     * @return 从当前读索引(readerIndex)开始到目标字节值的距离,如果未找到返回-1
+     *         示例：解析HTTP协议中的分隔符
+     *         HTTP协议中分隔符为"\r\n\r\n"，如果要查找"\r"字节，则调用如下方法：
+     *         示例：处理自定义协议中的消息边界
+     *         示例：查找字符串终止符
+     * @功能说明:
+     *        1. 在当前可读范围内搜索指定字节
+     *        2. 返回相对于当前读位置的偏移量
+     *        3. 不会改变ByteBuf的读写索引
+     */
     @Override
     public int bytesBefore(byte value) {
+        // 调用重载方法,传入:
+        // - readerIndex(): 当前读索引位置作为起始搜索位置
+        // - readableBytes(): 当前可读字节数作为搜索范围
+        // - value: 要查找的目标字节值
         return bytesBefore(readerIndex(), readableBytes(), value);
     }
 
@@ -1473,12 +1523,27 @@ public abstract class AbstractByteBuf extends ByteBuf {
         return endIndex - index;
     }
 
+    /**
+     * 遍历ByteBuf中的每个字节并进行处理
+     *
+     * @param processor 字节处理器,用于处理每个字节
+     * @return 如果处理器返回false时的字节索引,如果全部处理完返回-1
+     * 
+     * @功能说明:
+     *        1. 从readerIndex开始到writerIndex结束遍历所有可读字节
+     *        2. 对每个字节调用处理器的process方法
+     *        3. 支持中断处理流程
+     */
     @Override
     public int forEachByte(ByteProcessor processor) {
+        // 确保ByteBuf可访问(引用计数>0)
         ensureAccessible();
+
         try {
+            // 调用内部方法执行正向遍历(从低位到高位)
             return forEachByteAsc0(readerIndex, writerIndex, processor);
         } catch (Exception e) {
+            // 处理异常并重新抛出
             PlatformDependent.throwException(e);
             return -1;
         }
