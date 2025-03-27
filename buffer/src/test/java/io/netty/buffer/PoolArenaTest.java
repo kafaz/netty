@@ -28,16 +28,26 @@ public class PoolArenaTest {
 
     private static final int PAGE_SIZE = 8192;
     private static final int PAGE_SHIFTS = 11;
-    //chunkSize = pageSize * (2 ^ pageShifts)
+    // chunkSize = pageSize * (2 ^ pageShifts)
     private static final int CHUNK_SIZE = 16777216;
 
+    /**
+     * 测试内存容量规范化的功能
+     * 验证不同请求大小被正确规范化到合适的内存大小
+     */
     @Test
     public void testNormalizeCapacity() {
+        // 1. 创建SizeClasses实例
         SizeClasses sc = new SizeClasses(PAGE_SIZE, PAGE_SHIFTS, CHUNK_SIZE, 0);
+        // 2. 创建DirectArena实例
         PoolArena<ByteBuffer> arena = new PoolArena.DirectArena(null, sc);
-        int[] reqCapacities = {0, 15, 510, 1024, 1023, 1025};
-        int[] expectedResult = {16, 16, 512, 1024, 1024, 1280};
-        for (int i = 0; i < reqCapacities.length; i ++) {
+
+        // 3. 测试数据准备
+        int[] reqCapacities = { 0, 15, 510, 1024, 1023, 1025 }; // 请求容量
+        int[] expectedResult = { 16, 16, 512, 1024, 1024, 1280 }; // 期望的规范化结果
+
+        // 4. 执行测试
+        for (int i = 0; i < reqCapacities.length; i++) {
             assertEquals(expectedResult[i],
                     arena.sizeClass.sizeIdx2size(arena.sizeClass.size2SizeIdx(reqCapacities[i])));
         }
@@ -47,9 +57,9 @@ public class PoolArenaTest {
     public void testNormalizeAlignedCapacity() {
         SizeClasses sc = new SizeClasses(PAGE_SIZE, PAGE_SHIFTS, CHUNK_SIZE, 64);
         PoolArena<ByteBuffer> arena = new PoolArena.DirectArena(null, sc);
-        int[] reqCapacities = {0, 15, 510, 1024, 1023, 1025};
-        int[] expectedResult = {64, 64, 512, 1024, 1024, 1280};
-        for (int i = 0; i < reqCapacities.length; i ++) {
+        int[] reqCapacities = { 0, 15, 510, 1024, 1023, 1025 };
+        int[] expectedResult = { 64, 64, 512, 1024, 1024, 1280 };
+        for (int i = 0; i < reqCapacities.length; i++) {
             assertEquals(expectedResult[i],
                     arena.sizeClass.sizeIdx2size(arena.sizeClass.size2SizeIdx(reqCapacities[i])));
         }
@@ -112,16 +122,16 @@ public class PoolArenaTest {
     @Test
     public void testAllocationCounter() {
         final PooledByteBufAllocator allocator = new PooledByteBufAllocator(
-                true,   // preferDirect
-                0,      // nHeapArena
-                1,      // nDirectArena
-                8192,   // pageSize
-                11,     // maxOrder
-                0,      // tinyCacheSize
-                0,      // smallCacheSize
-                0,      // normalCacheSize
-                true    // useCacheForAllThreads
-                );
+                true, // preferDirect
+                0, // nHeapArena
+                1, // nDirectArena
+                8192, // pageSize
+                11, // maxOrder
+                0, // tinyCacheSize
+                0, // smallCacheSize
+                0, // normalCacheSize
+                true // useCacheForAllThreads
+        );
 
         // create small buffer
         final ByteBuf b1 = allocator.directBuffer(800);
@@ -131,7 +141,8 @@ public class PoolArenaTest {
         assertNotNull(b1);
         assertNotNull(b2);
 
-        // then release buffer to deallocated memory while threadlocal cache has been disabled
+        // then release buffer to deallocated memory while threadlocal cache has been
+        // disabled
         // allocations counter value must equals deallocations counter value
         assertTrue(b1.release());
         assertTrue(b2.release());
@@ -158,7 +169,8 @@ public class PoolArenaTest {
 
         // This causes the internal reused ByteBuffer duplicate limit to be set to 128
         pooledDst.writeBytes(ByteBuffer.allocate(128));
-        // Ensure internal ByteBuffer duplicate limit is properly reset (used in memoryCopy non-Unsafe case)
+        // Ensure internal ByteBuffer duplicate limit is properly reset (used in
+        // memoryCopy non-Unsafe case)
         pooledDst.chunk.arena.memoryCopy(pooledSrc.memory, 0, pooledDst, 512);
 
         src.release();

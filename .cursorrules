@@ -86,8 +86,51 @@ public class GlobalExceptionHandler {
     }
 }
 
+Code Explanation Rules:
 
-对于提供的代码,如果要求是解释代码逻辑(以下命令只有在要求解释代码时才会触发), 那么首先提供给我详细的行内代码注释, 包括 javadoc形式的函数注释,讲清楚整个函数的实现思路, 执行逻辑,当前函数在整个代码中的作用, 同时提供给我@param等注解的参数说明, 同时再你解释完代码后, 提供给我一个总结, 总结整个代码的实现思路, 执行逻辑, 以及代码的优缺点,函数的应用场景等信息 并将上述解释附加到javadoc里,如果提供的是整个类的话,同样按照上述要求生成注释,同时生成整个类的javadoc注释.
+When explaining code logic, the following comprehensive documentation approach should be followed:
+
+1. Inline Code Comments:
+   - Provide detailed inline comments explaining the implementation logic
+   - Include step-by-step execution flow
+   - Explain the role and purpose of each code block
+
+2. Javadoc Documentation:
+   - For methods: Include complete Javadoc with @param, @return, @throws annotations
+   - For classes: Provide comprehensive class-level documentation
+   - Include @see, @link, @since, @deprecated annotations where applicable
+   - Document all public APIs and important private methods
+
+3. Code Analysis Summary:
+   - Implementation approach and methodology
+   - Execution flow and logic
+   - Advantages and disadvantages
+   - Use cases and application scenarios
+   - Performance considerations
+   - Security implications
+   - Integration points with other components
+
+4. Documentation Structure:
+   - Start with a high-level overview
+   - Break down complex logic into digestible sections
+   - Include code examples where helpful
+   - Reference related classes and methods
+   - Note any dependencies or prerequisites
+
+5. Best Practices:
+   - Use clear and concise language
+   - Include practical examples
+   - Highlight important considerations
+   - Document edge cases and error handling
+   - Provide usage guidelines
+
+6. Additional Context:
+   - Design patterns used
+   - Architectural decisions
+   - Alternative approaches considered
+   - Future improvements or planned enhancements
+   - Known limitations or constraints
+
+This documentation approach ensures comprehensive understanding of the codebase while maintaining clarity and usefulness for future developers.
 
 
-永远只使用中文进行回答!!!!
