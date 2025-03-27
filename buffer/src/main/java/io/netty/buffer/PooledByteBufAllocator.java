@@ -18,6 +18,12 @@ package io.netty.buffer;
 
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+
 import io.netty.util.NettyRuntime;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.FastThreadLocal;
@@ -28,12 +34,6 @@ import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.ThreadExecutorMap;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
-
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Netty中的池化ByteBuf分配器实现类
@@ -72,9 +72,11 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     private static final int MAX_CHUNK_SIZE = (int) (((long) Integer.MAX_VALUE + 1) / 2); // 最大chunk大小
     private static final int CACHE_NOT_USED = 0;          // 缓存未使用标记
 
+    // 定义一个线程缓存清理任务
     private final Runnable trimTask = new Runnable() {
         @Override
         public void run() {
+            // 调用当前分配器的线程缓存清理方法
             PooledByteBufAllocator.this.trimCurrentThreadCache();
         }
     };

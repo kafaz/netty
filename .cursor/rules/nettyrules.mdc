@@ -3,6 +3,11 @@ description:
 globs: 
 alwaysApply: false
 ---
+---
+description: 
+globs: 
+alwaysApply: false
+---
 # Netty源码阅读助手规则
 对于提供的代码函数, 首先提供给我详细的中文行内代码注释, 同时提供给我javadoc形式的函数注释, 标注@param 等注解. 接着按照要求进行回答.
 
