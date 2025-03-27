@@ -26,6 +26,45 @@ import io.netty.util.internal.StringUtil;
 
 /**
  * Skeletal {@link ByteBufAllocator} implementation to extend.
+ * <p>
+ * 这个抽象类提供了{@link ByteBufAllocator}接口的骨架实现，实现了大部分创建
+ * 各种类型ByteBuf的通用逻辑，同时将实际内存分配的细节留给子类去实现。
+ * 主要采用了模板方法设计模式，子类只需要实现{@link #newHeapBuffer(int, int)}
+ * 和{@link #newDirectBuffer(int, int)}两个核心方法即可。
+ * <p>
+ * 该类提供以下主要功能：
+ * <ul>
+ *   <li>提供统一的缓冲区创建API，包括堆内存缓冲区、直接内存缓冲区和复合缓冲区</li>
+ *   <li>处理容量验证、默认值和最大值计算</li>
+ *   <li>支持内存泄漏检测（通过包装返回的缓冲区）</li>
+ *   <li>提供缓冲区扩容算法</li>
+ * </ul>
+ * <p>
+ * 继承此类的实现通常有两种类型：
+ * <ul>
+ *   <li>池化分配器 - 如{@code PooledByteBufAllocator}，实现缓冲区对象和底层内存的重用</li>
+ *   <li>非池化分配器 - 如{@code UnpooledByteBufAllocator}，每次请求都分配新的内存</li>
+ * </ul>
+ * <p>
+ * 使用示例：
+ * <pre>
+ * 创建一个堆内存缓冲区
+ * ByteBuf heapBuf = alloc.heapBuffer(1024);
+ * 
+ * 创建一个直接内存缓冲区
+ * ByteBuf directBuf = alloc.directBuffer(1024, 8192);
+ * 
+ * 创建一个复合缓冲区
+ * CompositeByteBuf compositeBuf = alloc.compositeBuffer();
+ * </pre>
+ * <p>
+ * 通常不推荐直接使用此类，而是应该使用其具体实现类{@code PooledByteBufAllocator}
+ * 或{@code UnpooledByteBufAllocator}，或者通过{@code ByteBufAllocator.DEFAULT}获取
+ * 默认的分配器实例。
+ * 
+ * @see ByteBufAllocator
+ * @see ByteBuf
+ * @see CompositeByteBuf
  */
 public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
     static final int DEFAULT_INITIAL_CAPACITY = 256;
