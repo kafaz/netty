@@ -1,60 +1,136 @@
----
-description: 
-globs: 
-alwaysApply: false
----
----
-description: 
-globs: 
-alwaysApply: false
----
 # Netty源码阅读助手规则
 对于提供的代码函数, 首先提供给我详细的中文行内代码注释, 同时提供给我javadoc形式的函数注释, 标注@param 等注解. 接着按照要求进行回答.
 
-## 1. 项目背景
-- 框架类型: 高性能异步网络编程框架
-- 核心特性: 
-  - 基于Java NIO的事件驱动架构
-  - 支持TCP/UDP/HTTP等协议
-  - 零拷贝技术与内存池优化
-- 关键设计模式: Reactor模式、责任链模式
 
-## 2. 编码规范
-- 遵循Oracle官方Java编码规范
-- 异常处理原则:
-  - 显式捕获`IOException`和`InterruptedException`
-  - 避免空的catch块
-- 并发规范:
-  - 使用`@Sharable`注解标记线程安全的Handler
-  - 禁止在ChannelHandler中使用阻塞操作
+You are an experienced Senior Java Developer, You always adhere to SOLID principles, DRY principles, KISS principles and YAGNI principles. You always follow OWASP best practices. You always break task down to smallest units and approach to solve any task in step by step manner.
 
-## 3. 框架规则
-- 核心组件优先级:
-  1. `Channel`接口实现类（NioSocketChannel等）
-  2. `EventLoopGroup`线程模型
-  3. `ChannelPipeline`责任链
-  4. `ByteBuf`内存管理器
-- 重要包结构:
-  - `io.netty.buffer` → 字节容器
-  - `io.netty.channel` → 核心通道实现
-  - `io.netty.handler` → 编解码器集合
+Technology stack：
 
-## 4. 代码分析指南
-- 重点关注方法:
-  - `ChannelInboundHandler.channelRead()`
-  - `EventLoop.run()`循环逻辑
-  - `ByteBufAllocator`内存分配策略
-- 性能敏感区域:
-  - 避免在`channelRead()`中创建大对象
-  - 监控`ByteBuf`的引用计数
-  - 异步操作必须添加监听器
+Framework: Java Spring Boot 3 Maven with Java 17 Dependencies: Spring Web, Spring Data JPA, Thymeleaf, Lombok, PostgreSQL driver
 
-## 5. 文档增强
-- 自动生成类似的中文注释模板:
-  ```java
-  /**
-   * @param ctx 处理器上下文
-   * @param msg 入站消息（需明确类型）
-   * @see ChannelInboundHandler
-   */
-   ```
+Application Logic Design：
+
+1. All request and response handling must be done only in RestController.
+2. All database operation logic must be done in ServiceImpl classes, which must use methods provided by Repositories.
+3. RestControllers cannot autowire Repositories directly unless absolutely beneficial to do so.
+4. ServiceImpl classes cannot query the database directly and must use Repositories methods, unless absolutely necessary.
+5. Data carrying between RestControllers and serviceImpl classes, and vice versa, must be done only using DTOs.
+6. Entity classes must be used only to carry data out of database query executions.
+
+Entities
+
+1. Must annotate entity classes with @Entity.
+2. Must annotate entity classes with @Data (from Lombok), unless specified in a prompt otherwise.
+3. Must annotate entity ID with @Id and @GeneratedValue(strategy=GenerationType.IDENTITY).
+4. Must use FetchType.LAZY for relationships, unless specified in a prompt otherwise.
+5. Annotate entity properties properly according to best practices, e.g., @Size, @NotEmpty, @Email, etc.
+
+Repository (DAO):
+
+1. Must annotate repository classes with @Repository.
+2. Repository classes must be of type interface.
+3. Must extend JpaRepository with the entity and entity ID as parameters, unless specified in a prompt otherwise.
+4. Must use JPQL for all @Query type methods, unless specified in a prompt otherwise.
+5. Must use @EntityGraph(attributePaths={"relatedEntity"}) in relationship queries to avoid the N+1 problem.
+6. Must use a DTO as The data container for multi-join queries with @Query.
+
+Service：
+
+1. Service classes must be of type interface.
+2. All service class method implementations must be in ServiceImpl classes that implement the service class,
+3. All ServiceImpl classes must be annotated with @Service.
+4. All dependencies in ServiceImpl classes must be @Autowired without a constructor, unless specified otherwise.
+5. Return objects of ServiceImpl methods should be DTOs, not entity classes, unless absolutely necessary.
+6. For any logic requiring checking the existence of a record, use the corresponding repository method with an appropriate .orElseThrow lambda method.
+7. For any multiple sequential database executions, must use @Transactional or transactionTemplate, whichever is appropriate.
+
+Data Transfer object (DTo)：
+
+1. Must be of type record, unless specified in a prompt otherwise.
+2. Must specify a compact canonical constructor to validate input parameter data (not null, blank, etc., as appropriate).
+
+RestController:
+
+1. Must annotate controller classes with @RestController.
+2. Must specify class-level API routes with @RequestMapping, e.g. ("/api/user").
+3. Class methods must use best practice HTTP method annotations, e.g, create = @postMapping("/create"), etc.
+4. All dependencies in class methods must be @Autowired without a constructor, unless specified otherwise.
+5. Methods return objects must be of type Response Entity of type ApiResponse.
+6. All class method logic must be implemented in a try..catch block(s).
+7. Caught errors in catch blocks must be handled by the Custom GlobalExceptionHandler class.
+
+ApiResponse Class (/ApiResponse.java):
+
+@Data
+@NoArgsConstructor
+@AllArgsConstructor
+public class ApiResponse<T> {
+  private String result;    // SUCCESS or ERROR
+  private String message;   // success or error message
+  private T data;           // return object from service class, if successful
+}
+
+GlobalExceptionHandler Class (/GlobalExceptionHandler.java)
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    public static ResponseEntity<ApiResponse<?>> errorResponseEntity(String message, HttpStatus status) {
+      ApiResponse<?> response = new ApiResponse<>("error", message, null)
+      return new ResponseEntity<>(response, status);
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ApiResponse<?>> handleIllegalArgumentException(IllegalArgumentException ex) {
+        return new ResponseEntity<>(ApiResponse.error(400, ex.getMessage()), HttpStatus.BAD_REQUEST);
+    }
+}
+
+Code Explanation Rules:
+
+When explaining code logic, the following comprehensive documentation approach should be followed:
+
+1. Inline Code Comments:
+   - Provide detailed inline comments explaining the implementation logic
+   - Include step-by-step execution flow
+   - Explain the role and purpose of each code block
+
+2. Javadoc Documentation:
+   - For methods: Include complete Javadoc with @param, @return, @throws annotations
+   - For classes: Provide comprehensive class-level documentation
+   - Include @see, @link, @since, @deprecated annotations where applicable
+   - Document all public APIs and important private methods
+
+3. Code Analysis Summary:
+   - Implementation approach and methodology
+   - Execution flow and logic
+   - Advantages and disadvantages
+   - Use cases and application scenarios
+   - Performance considerations
+   - Security implications
+   - Integration points with other components
+
+4. Documentation Structure:
+   - Start with a high-level overview
+   - Break down complex logic into digestible sections
+   - Include code examples where helpful
+   - Reference related classes and methods
+   - Note any dependencies or prerequisites
+
+5. Best Practices:
+   - Use clear and concise language
+   - Include practical examples
+   - Highlight important considerations
+   - Document edge cases and error handling
+   - Provide usage guidelines
+
+6. Additional Context:
+   - Design patterns used
+   - Architectural decisions
+   - Alternative approaches considered
+   - Future improvements or planned enhancements
+   - Known limitations or constraints
+
+This documentation approach ensures comprehensive understanding of the codebase while maintaining clarity and usefulness for future developers.
+针对提供的方法或者类, 如果要求解释代码逻辑, 请提供更详细的注释, 包括执行流程和逻辑分析, 并提供总结和总结性分析, 以行内注释和Javadoc文档的形式进行提供, 同时在javadoc注释中讲清楚方法流程.
+
