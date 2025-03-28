@@ -45,7 +45,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
     final ReentrantLock lock;
 
     // TODO: Test if adding padding helps under contention
-    //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
+    // private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
     /** Special constructor that creates a linked list head */
     PoolSubpage(int headIndex) {
@@ -62,26 +62,33 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
     }
 
     PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int pageShifts, int runOffset, int runSize, int elemSize) {
-        this.headIndex = head.headIndex;
-        this.chunk = chunk;
-        this.pageShifts = pageShifts;
-        this.runOffset = runOffset;
-        this.runSize = runSize;
-        this.elemSize = elemSize;
+        // 1. 初始化基本属性
+        this.headIndex = head.headIndex; // 设置头索引
+        this.chunk = chunk; // 关联的 PoolChunk
+        this.pageShifts = pageShifts; // 页面大小位移量
+        this.runOffset = runOffset; // 在 chunk 中的偏移量
+        this.runSize = runSize; // 内存块大小
+        this.elemSize = elemSize; // 每个元素的大小
 
-        doNotDestroy = true;
+        doNotDestroy = true; // 标记该 subpage 不可销毁
 
-        maxNumElems = numAvail = runSize / elemSize;
-        int bitmapLength = maxNumElems >>> 6;
-        if ((maxNumElems & 63) != 0) {
-            bitmapLength ++;
+        // 2. 计算可分配元素数量
+        maxNumElems = numAvail = runSize / elemSize; // 计算可以分配多少个元素
+        // 例如：如果 runSize=8192(8KB), elemSize=16字节，则 maxNumElems=512
+
+        // 3. 计算位图长度
+        int bitmapLength = maxNumElems >>> 6; // 右移6位，相当于除以64
+        if ((maxNumElems & 63) != 0) { // 检查是否有余数
+            bitmapLength++; // 如果有余数，需要多一个 long 来存储
         }
         this.bitmapLength = bitmapLength;
-        bitmap = new long[bitmapLength];
-        nextAvail = 0;
 
-        lock = null;
-        addToPool(head);
+        // 4. 初始化位图数组
+        bitmap = new long[bitmapLength]; // 创建位图数组
+        nextAvail = 0; // 下一个可用位置初始化为0
+
+        lock = null; // 锁初始化为 null
+        addToPool(head); // 将当前 subpage 添加到池中
     }
 
     /**
@@ -104,7 +111,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
         assert (bitmap[q] >>> r & 1) == 0;
         bitmap[q] |= 1L << r;
 
-        if (-- numAvail == 0) {
+        if (--numAvail == 0) {
             removeFromPool();
         }
 
@@ -113,7 +120,8 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
 
     /**
      * @return {@code true} if this subpage is in use.
-     *         {@code false} if this subpage is not used by its chunk and thus it's OK to be released.
+     *         {@code false} if this subpage is not used by its chunk and thus it's
+     *         OK to be released.
      */
     boolean free(PoolSubpage<T> head, int bitmapIdx) {
         int q = bitmapIdx >>> 6;
@@ -123,12 +131,16 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
 
         setNextAvail(bitmapIdx);
 
-        if (numAvail ++ == 0) {
+        if (numAvail++ == 0) {
             addToPool(head);
-            /* When maxNumElems == 1, the maximum numAvail is also 1.
+            /*
+             * When maxNumElems == 1, the maximum numAvail is also 1.
              * Each of these PoolSubpages will go in here when they do free operation.
-             * If they return true directly from here, then the rest of the code will be unreachable
-             * and they will not actually be recycled. So return true only on maxNumElems > 1. */
+             * If they return true directly from here, then the rest of the code will be
+             * unreachable
+             * and they will not actually be recycled. So return true only on maxNumElems >
+             * 1.
+             */
             if (maxNumElems > 1) {
                 return true;
             }
@@ -143,7 +155,8 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
                 return true;
             }
 
-            // Remove this subpage from the pool if there are other subpages left in the pool.
+            // Remove this subpage from the pool if there are other subpages left in the
+            // pool.
             doNotDestroy = false;
             removeFromPool();
             return false;
@@ -180,7 +193,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
     }
 
     private int findNextAvail() {
-        for (int i = 0; i < bitmapLength; i ++) {
+        for (int i = 0; i < bitmapLength; i++) {
             long bits = bitmap[i];
             if (~bits != 0) {
                 return findNextAvail0(i, bits);
@@ -191,7 +204,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
 
     private int findNextAvail0(int i, long bits) {
         final int baseVal = i << 6;
-        for (int j = 0; j < 64; j ++) {
+        for (int j = 0; j < 64; j++) {
             if ((bits & 1) == 0) {
                 int val = baseVal | j;
                 if (val < maxNumElems) {
@@ -208,17 +221,18 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
     private long toHandle(int bitmapIdx) {
         int pages = runSize >> pageShifts;
         return (long) runOffset << RUN_OFFSET_SHIFT
-               | (long) pages << SIZE_SHIFT
-               | 1L << IS_USED_SHIFT
-               | 1L << IS_SUBPAGE_SHIFT
-               | bitmapIdx;
+                | (long) pages << SIZE_SHIFT
+                | 1L << IS_USED_SHIFT
+                | 1L << IS_SUBPAGE_SHIFT
+                | bitmapIdx;
     }
 
     @Override
     public String toString() {
         final int numAvail;
         if (chunk == null) {
-            // This is the head so there is no need to synchronize at all as these never change.
+            // This is the head so there is no need to synchronize at all as these never
+            // change.
             numAvail = 0;
         } else {
             final boolean doNotDestroy;

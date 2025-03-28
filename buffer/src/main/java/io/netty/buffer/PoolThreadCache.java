@@ -16,7 +16,6 @@
 
 package io.netty.buffer;
 
-
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 import io.netty.buffer.PoolArena.SizeClass;
@@ -37,9 +36,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Acts a Thread cache for allocations. This implementation is moduled after
- * <a href="https://people.freebsd.org/~jasone/jemalloc/bsdcan2006/jemalloc.pdf">jemalloc</a> and the descripted
+ * <a href=
+ * "https://people.freebsd.org/~jasone/jemalloc/bsdcan2006/jemalloc.pdf">jemalloc</a>
+ * and the descripted
  * technics of
- * <a href="https://www.facebook.com/notes/facebook-engineering/scalable-memory-allocation-using-jemalloc/480222803919">
+ * <a href=
+ * "https://www.facebook.com/notes/facebook-engineering/scalable-memory-allocation-using-jemalloc/480222803919">
  * Scalable memory allocation using jemalloc</a>.
  */
 final class PoolThreadCache {
@@ -47,14 +49,14 @@ final class PoolThreadCache {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PoolThreadCache.class);
     private static final int INTEGER_SIZE_MINUS_ONE = Integer.SIZE - 1;
 
-    final PoolArena<byte[]> heapArena;
-    final PoolArena<ByteBuffer> directArena;
+    final PoolArena<byte[]> heapArena; // 堆内存区域
+    final PoolArena<ByteBuffer> directArena; // 直接内存区域
 
     // Hold the caches for the different size classes, which are small and normal.
-    private final MemoryRegionCache<byte[]>[] smallSubPageHeapCaches;
-    private final MemoryRegionCache<ByteBuffer>[] smallSubPageDirectCaches;
-    private final MemoryRegionCache<byte[]>[] normalHeapCaches;
-    private final MemoryRegionCache<ByteBuffer>[] normalDirectCaches;
+    private final MemoryRegionCache<byte[]>[] smallSubPageHeapCaches; // 小页堆内存缓存
+    private final MemoryRegionCache<ByteBuffer>[] smallSubPageDirectCaches; // 小页直接内存缓存
+    private final MemoryRegionCache<byte[]>[] normalHeapCaches; // 普通堆内存缓存
+    private final MemoryRegionCache<ByteBuffer>[] normalDirectCaches; // 普通直接内存缓存
 
     private final int freeSweepAllocationThreshold;
     private final AtomicBoolean freed = new AtomicBoolean();
@@ -64,11 +66,11 @@ final class PoolThreadCache {
     private int allocations;
 
     // TODO: Test if adding padding helps under contention
-    //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
+    // private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
     PoolThreadCache(PoolArena<byte[]> heapArena, PoolArena<ByteBuffer> directArena,
-                    int smallCacheSize, int normalCacheSize, int maxCachedBufferCapacity,
-                    int freeSweepAllocationThreshold, boolean useFinalizer) {
+            int smallCacheSize, int normalCacheSize, int maxCachedBufferCapacity,
+            int freeSweepAllocationThreshold, boolean useFinalizer) {
         checkPositiveOrZero(maxCachedBufferCapacity, "maxCachedBufferCapacity");
         this.freeSweepAllocationThreshold = freeSweepAllocationThreshold;
         this.heapArena = heapArena;
@@ -103,13 +105,19 @@ final class PoolThreadCache {
         freeOnFinalize = useFinalizer ? new FreeOnFinalize(this) : null;
     }
 
+    /**
+     * 创建子页缓存数组
+     * 
+     * @param cacheSize 每个缓存的大小
+     * @param numCaches 缓存数量
+     * @return 缓存数组
+     */
     private static <T> MemoryRegionCache<T>[] createSubPageCaches(
             int cacheSize, int numCaches) {
         if (cacheSize > 0 && numCaches > 0) {
             @SuppressWarnings("unchecked")
             MemoryRegionCache<T>[] cache = new MemoryRegionCache[numCaches];
             for (int i = 0; i < cache.length; i++) {
-                // TODO: maybe use cacheSize / cache.length
                 cache[i] = new SubPageMemoryRegionCache<T>(cacheSize);
             }
             return cache;
@@ -123,9 +131,10 @@ final class PoolThreadCache {
             int cacheSize, int maxCachedBufferCapacity, PoolArena<T> area) {
         if (cacheSize > 0 && maxCachedBufferCapacity > 0) {
             int max = Math.min(area.sizeClass.chunkSize, maxCachedBufferCapacity);
-            // Create as many normal caches as we support based on how many sizeIdx we have and what the upper
+            // Create as many normal caches as we support based on how many sizeIdx we have
+            // and what the upper
             // bound is that we want to cache in general.
-            List<MemoryRegionCache<T>> cache = new ArrayList<MemoryRegionCache<T>>() ;
+            List<MemoryRegionCache<T>> cache = new ArrayList<MemoryRegionCache<T>>();
             for (int idx = area.sizeClass.nSubpages; idx < area.sizeClass.nSizes &&
                     area.sizeClass.sizeIdx2size(idx) <= max; idx++) {
                 cache.add(new NormalMemoryRegionCache<T>(cacheSize));
@@ -142,14 +151,16 @@ final class PoolThreadCache {
     }
 
     /**
-     * Try to allocate a small buffer out of the cache. Returns {@code true} if successful {@code false} otherwise
+     * Try to allocate a small buffer out of the cache. Returns {@code true} if
+     * successful {@code false} otherwise
      */
     boolean allocateSmall(PoolArena<?> area, PooledByteBuf<?> buf, int reqCapacity, int sizeIdx) {
         return allocate(cacheForSmall(area, sizeIdx), buf, reqCapacity);
     }
 
     /**
-     * Try to allocate a normal buffer out of the cache. Returns {@code true} if successful {@code false} otherwise
+     * Try to allocate a normal buffer out of the cache. Returns {@code true} if
+     * successful {@code false} otherwise
      */
     boolean allocateNormal(PoolArena<?> area, PooledByteBuf<?> buf, int reqCapacity, int sizeIdx) {
         return allocate(cacheForNormal(area, sizeIdx), buf, reqCapacity);
@@ -162,7 +173,7 @@ final class PoolThreadCache {
             return false;
         }
         boolean allocated = cache.allocate(buf, reqCapacity, this);
-        if (++ allocations >= freeSweepAllocationThreshold) {
+        if (++allocations >= freeSweepAllocationThreshold) {
             allocations = 0;
             trim();
         }
@@ -170,12 +181,13 @@ final class PoolThreadCache {
     }
 
     /**
-     * Add {@link PoolChunk} and {@code handle} to the cache if there is enough room.
+     * Add {@link PoolChunk} and {@code handle} to the cache if there is enough
+     * room.
      * Returns {@code true} if it fit into the cache {@code false} otherwise.
      */
     @SuppressWarnings({ "unchecked", "rawtypes" })
     boolean add(PoolArena<?> area, PoolChunk chunk, ByteBuffer nioBuffer,
-                long handle, int normCapacity, SizeClass sizeClass) {
+            long handle, int normCapacity, SizeClass sizeClass) {
         int sizeIdx = area.sizeClass.size2SizeIdx(normCapacity);
         MemoryRegionCache<?> cache = cache(area, sizeIdx, sizeClass);
         if (cache == null) {
@@ -189,34 +201,37 @@ final class PoolThreadCache {
 
     private MemoryRegionCache<?> cache(PoolArena<?> area, int sizeIdx, SizeClass sizeClass) {
         switch (sizeClass) {
-        case Normal:
-            return cacheForNormal(area, sizeIdx);
-        case Small:
-            return cacheForSmall(area, sizeIdx);
-        default:
-            throw new Error();
+            case Normal:
+                return cacheForNormal(area, sizeIdx);
+            case Small:
+                return cacheForSmall(area, sizeIdx);
+            default:
+                throw new Error();
         }
     }
 
     /**
-     *  Should be called if the Thread that uses this cache is about to exit to release resources out of the cache
+     * Should be called if the Thread that uses this cache is about to exit to
+     * release resources out of the cache
      */
     void free(boolean finalizer) {
-        // As free() may be called either by the finalizer or by FastThreadLocal.onRemoval(...) we need to ensure
+        // As free() may be called either by the finalizer or by
+        // FastThreadLocal.onRemoval(...) we need to ensure
         // we only call this one time.
         if (freed.compareAndSet(false, true)) {
             if (freeOnFinalize != null) {
-                // Help GC: this can race with a finalizer thread, but will be null out regardless
+                // Help GC: this can race with a finalizer thread, but will be null out
+                // regardless
                 freeOnFinalize.cache = null;
             }
             int numFreed = free(smallSubPageDirectCaches, finalizer) +
-                           free(normalDirectCaches, finalizer) +
-                           free(smallSubPageHeapCaches, finalizer) +
-                           free(normalHeapCaches, finalizer);
+                    free(normalDirectCaches, finalizer) +
+                    free(smallSubPageHeapCaches, finalizer) +
+                    free(normalHeapCaches, finalizer);
 
             if (numFreed > 0 && logger.isDebugEnabled()) {
                 logger.debug("Freed {} thread-local buffer(s) from thread: {}", numFreed,
-                             Thread.currentThread().getName());
+                        Thread.currentThread().getName());
             }
 
             if (directArena != null) {
@@ -235,7 +250,7 @@ final class PoolThreadCache {
         }
 
         int numFreed = 0;
-        for (MemoryRegionCache<?> c: caches) {
+        for (MemoryRegionCache<?> c : caches) {
             numFreed += free(c, finalizer);
         }
         return numFreed;
@@ -259,7 +274,7 @@ final class PoolThreadCache {
         if (caches == null) {
             return;
         }
-        for (MemoryRegionCache<?> c: caches) {
+        for (MemoryRegionCache<?> c : caches) {
             trim(c);
         }
     }
@@ -279,7 +294,8 @@ final class PoolThreadCache {
     }
 
     private MemoryRegionCache<?> cacheForNormal(PoolArena<?> area, int sizeIdx) {
-        // We need to subtract area.sizeClass.nSubpages as sizeIdx is the overall index for all sizes.
+        // We need to subtract area.sizeClass.nSubpages as sizeIdx is the overall index
+        // for all sizes.
         int idx = sizeIdx - area.sizeClass.nSubpages;
         if (area.isDirect()) {
             return cache(normalDirectCaches, idx);
@@ -339,10 +355,11 @@ final class PoolThreadCache {
         }
 
         /**
-         * Init the {@link PooledByteBuf} using the provided chunk and handle with the capacity restrictions.
+         * Init the {@link PooledByteBuf} using the provided chunk and handle with the
+         * capacity restrictions.
          */
         protected abstract void initBuf(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle,
-                                        PooledByteBuf<T> buf, int reqCapacity, PoolThreadCache threadCache);
+                PooledByteBuf<T> buf, int reqCapacity, PoolThreadCache threadCache);
 
         /**
          * Add to cache if not already full.
@@ -360,7 +377,8 @@ final class PoolThreadCache {
         }
 
         /**
-         * Allocate something out of the cache if possible and remove the entry from the cache.
+         * Allocate something out of the cache if possible and remove the entry from the
+         * cache.
          */
         public final boolean allocate(PooledByteBuf<T> buf, int reqCapacity, PoolThreadCache threadCache) {
             Entry<T> entry = queue.poll();
@@ -370,13 +388,15 @@ final class PoolThreadCache {
             initBuf(entry.chunk, entry.nioBuffer, entry.handle, buf, reqCapacity, threadCache);
             entry.unguardedRecycle();
 
-            // allocations is not thread-safe which is fine as this is only called from the same thread all time.
-            ++ allocations;
+            // allocations is not thread-safe which is fine as this is only called from the
+            // same thread all time.
+            ++allocations;
             return true;
         }
 
         /**
-         * Clear out this cache and free up all previous cached {@link PoolChunk}s and {@code handle}s.
+         * Clear out this cache and free up all previous cached {@link PoolChunk}s and
+         * {@code handle}s.
          */
         public final int free(boolean finalizer) {
             return free(Integer.MAX_VALUE, finalizer);
@@ -410,7 +430,7 @@ final class PoolThreadCache {
         }
 
         @SuppressWarnings({ "unchecked", "rawtypes" })
-        private  void freeEntry(Entry entry, boolean finalizer) {
+        private void freeEntry(Entry entry, boolean finalizer) {
             // Capture entry state before we recycle the entry object.
             PoolChunk chunk = entry.chunk;
             long handle = entry.handle;
@@ -418,7 +438,8 @@ final class PoolThreadCache {
             int normCapacity = entry.normCapacity;
 
             if (!finalizer) {
-                // recycle now so PoolChunk can be GC'ed. This will only be done if this is not freed because of
+                // recycle now so PoolChunk can be GC'ed. This will only be done if this is not
+                // freed because of
                 // a finalizer.
                 entry.recycle();
             }
@@ -480,15 +501,17 @@ final class PoolThreadCache {
             this.cache = cache;
         }
 
-        /// TODO: In the future when we move to Java9+ we should use java.lang.ref.Cleaner.
-        @SuppressWarnings({"FinalizeDeclaration", "deprecation"})
+        /// TODO: In the future when we move to Java9+ we should use
+        /// java.lang.ref.Cleaner.
+        @SuppressWarnings({ "FinalizeDeclaration", "deprecation" })
         @Override
         protected void finalize() throws Throwable {
             try {
                 super.finalize();
             } finally {
                 PoolThreadCache cache = this.cache;
-                // this can race with a non-finalizer thread calling free: regardless who wins, the cache will be
+                // this can race with a non-finalizer thread calling free: regardless who wins,
+                // the cache will be
                 // null out
                 this.cache = null;
                 if (cache != null) {

@@ -31,34 +31,39 @@ import java.util.concurrent.locks.ReentrantLock;
 import static io.netty.buffer.PoolChunk.isSubpage;
 import static java.lang.Math.max;
 
-
 /**
- * <p>Netty内存管理系统的核心组件，负责内存块的分配、管理和回收。</p>
+ * <p>
+ * Netty内存管理系统的核心组件，负责内存块的分配、管理和回收。
+ * </p>
  * 
- * <p>PoolArena是一个内存分配区域的抽象，管理多个内存块(chunk)和小内存页(subpage)，
+ * <p>
+ * PoolArena是一个内存分配区域的抽象，管理多个内存块(chunk)和小内存页(subpage)，
  * 根据请求的内存大小采用不同的分配策略。它通过多级分类和缓存机制，实现高效的内存
- * 分配和复用，减少内存碎片和GC压力。</p>
+ * 分配和复用，减少内存碎片和GC压力。
+ * </p>
  * 
  * <h3>内存分配策略</h3>
  * <ul>
- *   <li><b>小对象</b> (≤4KB): 使用subpage级别分配，优先从线程本地缓存分配</li>
- *   <li><b>普通对象</b> (4KB-16MB): 在chunk内进行页级别分配，使用伙伴算法</li>
- *   <li><b>大对象</b> (>16MB): 直接分配独立chunk，不进入缓存系统</li>
+ * <li><b>小对象</b> (≤4KB): 使用subpage级别分配，优先从线程本地缓存分配</li>
+ * <li><b>普通对象</b> (4KB-16MB): 在chunk内进行页级别分配，使用伙伴算法</li>
+ * <li><b>大对象</b> (>16MB): 直接分配独立chunk，不进入缓存系统</li>
  * </ul>
  * 
  * <h3>内存管理特性</h3>
  * <ul>
- *   <li>通过多级PoolChunkList管理不同使用率的内存块</li>
- *   <li>支持线程本地缓存(PoolThreadCache)减少锁竞争</li>
- *   <li>使用伙伴分配算法和位图追踪内存分配状态</li>
- *   <li>提供详细的内存使用统计和监控能力</li>
- *   <li>支持堆内存和直接内存的统一抽象</li>
+ * <li>通过多级PoolChunkList管理不同使用率的内存块</li>
+ * <li>支持线程本地缓存(PoolThreadCache)减少锁竞争</li>
+ * <li>使用伙伴分配算法和位图追踪内存分配状态</li>
+ * <li>提供详细的内存使用统计和监控能力</li>
+ * <li>支持堆内存和直接内存的统一抽象</li>
  * </ul>
  * 
- * <p>PoolArena是一个抽象类，有两个具体实现：</p>
+ * <p>
+ * PoolArena是一个抽象类，有两个具体实现：
+ * </p>
  * <ul>
- *   <li>{@link HeapArena} - 管理基于JVM堆的内存</li>
- *   <li>{@link DirectArena} - 管理堆外直接内存</li>
+ * <li>{@link HeapArena} - 管理基于JVM堆的内存</li>
+ * <li>{@link DirectArena} - 管理堆外直接内存</li>
  * </ul>
  * 
  * @param <T> 内存类型，对于HeapArena是byte[]，对于DirectArena是ByteBuffer
@@ -266,45 +271,56 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         }
     }
 
-    private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf, final int reqCapacity,
-            final int sizeIdx) {
+    private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf,
+            final int reqCapacity, final int sizeIdx) {
 
+        // 1. 首先尝试从线程缓存中分配
         if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) {
-            // was able to allocate out of the cache so move on
-            return;
+            return; // 如果从缓存分配成功，直接返回
         }
 
-        /*
-         * Synchronize on the head. This is needed as {@link
-         * PoolChunk#allocateSubpage(int)} and
-         * {@link PoolChunk#free(long)} may modify the doubly linked list as well.
-         */
+        // 2. 获取对应大小的 Subpage 池头节点
         final PoolSubpage<T> head = smallSubpagePools[sizeIdx];
         final boolean needsNormalAllocation;
+
+        // 3. 加锁保护 Subpage 池的访问
         head.lock();
         try {
+            // 4. 获取下一个可用的 Subpage
             final PoolSubpage<T> s = head.next;
-            needsNormalAllocation = s == head;
+            needsNormalAllocation = s == head; // 判断是否需要正常分配
+
+            // 5. 如果 Subpage 池不为空
             if (!needsNormalAllocation) {
-                assert s.doNotDestroy && s.elemSize == sizeClass.sizeIdx2size(sizeIdx) : "doNotDestroy=" +
-                        s.doNotDestroy + ", elemSize=" + s.elemSize + ", sizeIdx=" + sizeIdx;
+                // 验证 Subpage 状态
+                assert s.doNotDestroy && s.elemSize == sizeClass.sizeIdx2size(sizeIdx)
+                        : "doNotDestroy=" + s.doNotDestroy +
+                                ", elemSize=" + s.elemSize +
+                                ", sizeIdx=" + sizeIdx;
+
+                // 6. 分配内存
                 long handle = s.allocate();
                 assert handle >= 0;
+
+                // 7. 初始化 ByteBuf
                 s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
             }
         } finally {
-            head.unlock();
+            head.unlock(); // 释放锁
         }
 
+        // 8. 如果需要正常分配
         if (needsNormalAllocation) {
-            lock();
+            lock(); // 加锁保护 Arena
             try {
+                // 9. 执行正常分配
                 allocateNormal(buf, reqCapacity, sizeIdx, cache);
             } finally {
-                unlock();
+                unlock(); // 释放锁
             }
         }
 
+        // 10. 增加小内存分配计数
         incSmallAllocation();
     }
 
@@ -345,10 +361,10 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     }
 
     private void allocateHuge(PooledByteBuf<T> buf, int reqCapacity) {
-        PoolChunk<T> chunk = newUnpooledChunk(reqCapacity);
-        activeBytesHuge.add(chunk.chunkSize());
-        buf.initUnpooled(chunk, reqCapacity);
-        allocationsHuge.increment();
+        PoolChunk<T> chunk = newUnpooledChunk(reqCapacity); // 步骤1: 创建非池化内存块
+        activeBytesHuge.add(chunk.chunkSize()); // 步骤2: 更新内存使用统计
+        buf.initUnpooled(chunk, reqCapacity); // 步骤3: 初始化缓冲区
+        allocationsHuge.increment(); // 步骤4: 更新分配计数器
     }
 
     void free(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, int normCapacity, PoolThreadCache cache) {
