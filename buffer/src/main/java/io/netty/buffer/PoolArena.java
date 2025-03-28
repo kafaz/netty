@@ -16,9 +16,8 @@
 
 package io.netty.buffer;
 
-import io.netty.util.internal.LongCounter;
-import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.StringUtil;
+import static io.netty.buffer.PoolChunk.isSubpage;
+import static java.lang.Math.max;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -28,8 +27,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
-import static io.netty.buffer.PoolChunk.isSubpage;
-import static java.lang.Math.max;
+import io.netty.util.internal.LongCounter;
+import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.StringUtil;
 
 
 /**
