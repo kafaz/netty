@@ -82,58 +82,281 @@ import static java.lang.Math.min;
  */
 public final class PlatformDependent {
 
+    /**
+     * 类内部日志记录器，用于记录平台检测过程中的重要信息和警告。
+     */
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PlatformDependent.class);
 
+    /**
+     * 用于解析JVM启动参数中最大直接内存大小设置的正则表达式模式。
+     * <p>
+     * 在JVM启动时通过分析-XX:MaxDirectMemorySize=&lt;size&gt;参数提取配置值。
+     * </p>
+     */
     private static Pattern MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN;
+
+    /**
+     * 指示当前进程是否可能以超级用户(root)权限运行。
+     * <p>
+     * 在某些系统操作（如端口绑定、内存分配）中，超级用户权限可能影响操作行为和结果。
+     * </p>
+     */
     private static final boolean MAYBE_SUPER_USER;
 
+    /**
+     * 指示当前平台是否默认支持启用TCP_NODELAY选项。
+     * <p>
+     * 非Android平台通常默认支持此选项，用于禁用Nagle算法，减少网络延迟。
+     * </p>
+     */
     private static final boolean CAN_ENABLE_TCP_NODELAY_BY_DEFAULT = !isAndroid();
 
+    /**
+     * 记录Unsafe API不可用的原因（如果存在）。
+     * <p>
+     * Unsafe提供了直接内存访问和其他底层操作能力，对Netty性能至关重要。
+     * 如果不可用，此变量存储具体原因，帮助诊断性能问题。
+     * </p>
+     */
     private static final Throwable UNSAFE_UNAVAILABILITY_CAUSE = unsafeUnavailabilityCause0();
+
+    /**
+     * 指示是否优先使用直接内存缓冲区而非堆内存缓冲区。
+     * <p>
+     * 直接内存通常在网络I/O操作中提供更好性能，但分配和释放开销较大。
+     * 此标志基于平台特性和可用性自动设置。
+     * </p>
+     */
     private static final boolean DIRECT_BUFFER_PREFERRED;
+
+    /**
+     * 估算的JVM可用最大直接内存容量（字节）。
+     * <p>
+     * 基于JVM参数、系统配置和平台特性计算。
+     * 用于防止Netty过度分配直接内存，避免OutOfMemoryError。
+     * </p>
+     */
     private static final long MAX_DIRECT_MEMORY = estimateMaxDirectMemory();
 
-    private static final int MPSC_CHUNK_SIZE =  1024;
-    private static final int MIN_MAX_MPSC_CAPACITY =  MPSC_CHUNK_SIZE * 2;
+    /**
+     * MPSC（多生产者单消费者）队列的默认块大小。
+     * <p>
+     * 此值影响队列内部数组的分配大小，平衡内存使用和性能。
+     * MPSC队列在Netty的事件处理和任务调度中广泛使用。
+     * </p>
+     */
+    private static final int MPSC_CHUNK_SIZE = 1024;
+
+    /**
+     * MPSC队列允许的最小最大容量。
+     * <p>
+     * 确保队列至少有足够容量处理基本负载，防止过早扩容或频繁溢出。
+     * </p>
+     */
+    private static final int MIN_MAX_MPSC_CAPACITY = MPSC_CHUNK_SIZE * 2;
+
+    /**
+     * MPSC队列允许的最大容量上限。
+     * <p>
+     * 限制队列最大可增长至2的最大幂值，防止过度内存消耗。
+     * </p>
+     */
     private static final int MAX_ALLOWED_MPSC_CAPACITY = Pow2.MAX_POW2;
 
+    /**
+     * byte[]数组的基准偏移量，用于Unsafe直接内存操作。
+     * <p>
+     * 在使用Unsafe进行内存复制和操作时，需要知道数组数据的起始偏移量。
+     * 此值由JVM决定，与JVM实现和平台相关。
+     * </p>
+     */
     private static final long BYTE_ARRAY_BASE_OFFSET = byteArrayBaseOffset0();
 
+    /**
+     * 系统临时目录的File对象。
+     * <p>
+     * 用于创建临时文件和目录，如内存映射文件和临时套接字。
+     * </p>
+     */
     private static final File TMPDIR = tmpdir0();
 
+    /**
+     * JVM的位模式（32位或64位）。
+     * <p>
+     * 影响内存寻址能力、性能和某些优化策略的选择。
+     * </p>
+     */
     private static final int BIT_MODE = bitMode0();
+
+    /**
+     * 标准化的处理器架构标识符。
+     * <p>
+     * 对原始os.arch系统属性进行标准化处理，便于跨平台兼容性检查。
+     * </p>
+     */
     private static final String NORMALIZED_ARCH = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
+
+    /**
+     * 标准化的操作系统标识符。
+     * <p>
+     * 对原始os.name系统属性进行标准化处理，便于跨平台兼容性检查。
+     * </p>
+     */
     private static final String NORMALIZED_OS = normalizeOs(SystemPropertyUtil.get("os.name", ""));
 
-    // keep in sync with maven's pom.xml via os.detection.classifierWithLikes!
-    private static final String[] ALLOWED_LINUX_OS_CLASSIFIERS = {"fedora", "suse", "arch"};
+    /**
+     * 允许的Linux操作系统分类器列表。
+     * <p>
+     * 用于识别特定Linux发行版，与Maven构建系统的本地库分类器匹配。
+     * </p>
+     */
+    private static final String[] ALLOWED_LINUX_OS_CLASSIFIERS = { "fedora", "suse", "arch" };
+
+    /**
+     * Linux操作系统分类器集合。
+     * <p>
+     * 存储当前系统匹配的Linux发行版标识符，用于本地库加载决策。
+     * </p>
+     */
     private static final Set<String> LINUX_OS_CLASSIFIERS;
 
+    /**
+     * 指示当前操作系统是否为Windows。
+     * <p>
+     * 影响文件路径处理、网络API选择和本地库加载策略。
+     * </p>
+     */
     private static final boolean IS_WINDOWS = isWindows0();
+
+    /**
+     * 指示当前操作系统是否为MacOS X。
+     * <p>
+     * 影响本地库加载、线程模型和某些平台特定优化。
+     * </p>
+     */
     private static final boolean IS_OSX = isOsx0();
+
+    /**
+     * 指示当前JVM是否为IBM J9 JVM。
+     * <p>
+     * 不同JVM实现有不同特性和限制，影响内存管理和并发策略。
+     * </p>
+     */
     private static final boolean IS_J9_JVM = isJ9Jvm0();
+
+    /**
+     * 指示当前运行环境是否为IKVM.NET（.NET上的Java实现）。
+     * <p>
+     * IKVM环境下某些Java原生功能可能有限制或行为差异。
+     * </p>
+     */
     private static final boolean IS_IVKVM_DOT_NET = isIkvmDotNet0();
 
+    /**
+     * 当前平台的内存地址大小（字节数）。
+     * <p>
+     * 通常在32位系统上为4，64位系统上为8。
+     * 影响指针操作和内存对齐要求。
+     * </p>
+     */
     private static final int ADDRESS_SIZE = addressSize0();
+
+    /**
+     * 指示是否使用无清理器的直接缓冲区。
+     * <p>
+     * 在支持Unsafe的平台上，可以创建不带Cleaner的直接缓冲区，
+     * 提高性能但要求手动管理内存释放。
+     * </p>
+     */
     private static final boolean USE_DIRECT_BUFFER_NO_CLEANER;
+
+    /**
+     * 直接内存使用计数器。
+     * <p>
+     * 跟踪当前已分配的直接内存总量，用于防止内存泄漏和过度分配。
+     * </p>
+     */
     private static final AtomicLong DIRECT_MEMORY_COUNTER;
+
+    /**
+     * 直接内存分配上限。
+     * <p>
+     * 基于MAX_DIRECT_MEMORY计算，限制Netty能分配的最大直接内存量。
+     * </p>
+     */
     private static final long DIRECT_MEMORY_LIMIT;
+
+    /**
+     * 线程本地随机数生成器提供者。
+     * <p>
+     * 提供高性能、线程安全的随机数生成能力，用于各种随机化操作。
+     * </p>
+     */
     private static final ThreadLocalRandomProvider RANDOM_PROVIDER;
+
+    /**
+     * 直接缓冲区清理器接口实现。
+     * <p>
+     * 负责释放不再使用的直接内存缓冲区，防止内存泄漏。
+     * 根据平台能力选择最合适的实现。
+     * </p>
+     */
     private static final Cleaner CLEANER;
+
+    /**
+     * 未初始化数组分配阈值。
+     * <p>
+     * 控制何时对大型数组使用特殊分配策略，优化内存使用和GC行为。
+     * </p>
+     */
     private static final int UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD;
-    // For specifications, see https://www.freedesktop.org/software/systemd/man/os-release.html
-    private static final String[] OS_RELEASE_FILES = {"/etc/os-release", "/usr/lib/os-release"};
+
+    /**
+     * Linux系统发行版信息文件路径数组。
+     * <p>
+     * 用于检测具体Linux发行版，遵循freedesktop.org标准。
+     * </p>
+     */
+    private static final String[] OS_RELEASE_FILES = { "/etc/os-release", "/usr/lib/os-release" };
+
+    /**
+     * Linux发行版ID字段前缀。
+     * <p>
+     * 用于从os-release文件中提取发行版标识符。
+     * </p>
+     */
     private static final String LINUX_ID_PREFIX = "ID=";
+
+    /**
+     * Linux发行版ID_LIKE字段前缀。
+     * <p>
+     * 用于从os-release文件中提取发行版相似性信息。
+     * </p>
+     */
     private static final String LINUX_ID_LIKE_PREFIX = "ID_LIKE=";
+
+    /**
+     * 指示本地字节序是否为大端序。
+     * <p>
+     * 影响字节序转换操作和网络协议处理。
+     * 网络字节序通常为大端序，而大多数现代处理器使用小端序。
+     * </p>
+     */
     public static final boolean BIG_ENDIAN_NATIVE_ORDER = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
 
+    /**
+     * 空操作清理器实现。
+     * <p>
+     * 当无法使用实际的清理机制时，提供一个不执行任何操作的后备实现。
+     * 用于保持API一致性，但可能导致内存泄漏风险。
+     * </p>
+     */
     private static final Cleaner NOOP = new Cleaner() {
         @Override
         public void freeDirectBuffer(ByteBuffer buffer) {
             // NOOP
         }
     };
-
     static {
         if (javaVersion() >= 7) {
             RANDOM_PROVIDER = new ThreadLocalRandomProvider() {
@@ -154,11 +377,13 @@ public final class PlatformDependent {
 
         // Here is how the system property is used:
         //
-        // * <  0  - Don't use cleaner, and inherit max direct memory from java. In this case the
-        //           "practical max direct memory" would be 2 * max memory as defined by the JDK.
-        // * == 0  - Use cleaner, Netty will not enforce max memory, and instead will defer to JDK.
-        // * >  0  - Don't use cleaner. This will limit Netty's total direct memory
-        //           (note: that JDK's direct memory limit is independent of this).
+        // * < 0 - Don't use cleaner, and inherit max direct memory from java. In this
+        // case the
+        // "practical max direct memory" would be 2 * max memory as defined by the JDK.
+        // * == 0 - Use cleaner, Netty will not enforce max memory, and instead will
+        // defer to JDK.
+        // * > 0 - Don't use cleaner. This will limit Netty's total direct memory
+        // (note: that JDK's direct memory limit is independent of this).
         long maxDirectMemory = SystemPropertyUtil.getLong("io.netty.maxDirectMemory", -1);
 
         if (maxDirectMemory == 0 || !hasUnsafe() || !PlatformDependent0.hasDirectBufferNoCleanerConstructor()) {
@@ -180,10 +405,11 @@ public final class PlatformDependent {
         logger.debug("-Dio.netty.maxDirectMemory: {} bytes", maxDirectMemory);
         DIRECT_MEMORY_LIMIT = maxDirectMemory >= 1 ? maxDirectMemory : MAX_DIRECT_MEMORY;
 
-        int tryAllocateUninitializedArray =
-                SystemPropertyUtil.getInt("io.netty.uninitializedArrayAllocationThreshold", 1024);
-        UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD = javaVersion() >= 9 && PlatformDependent0.hasAllocateArrayMethod() ?
-                tryAllocateUninitializedArray : -1;
+        int tryAllocateUninitializedArray = SystemPropertyUtil.getInt("io.netty.uninitializedArrayAllocationThreshold",
+                1024);
+        UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD = javaVersion() >= 9 && PlatformDependent0.hasAllocateArrayMethod()
+                ? tryAllocateUninitializedArray
+                : -1;
         logger.debug("-Dio.netty.uninitializedArrayAllocationThreshold: {}", UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD);
 
         MAYBE_SUPER_USER = maybeSuperUser0();
@@ -200,22 +426,25 @@ public final class PlatformDependent {
             CLEANER = NOOP;
         }
 
-        // We should always prefer direct buffers by default if we can use a Cleaner to release direct buffers.
+        // We should always prefer direct buffers by default if we can use a Cleaner to
+        // release direct buffers.
         DIRECT_BUFFER_PREFERRED = CLEANER != NOOP
-                                  && !SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
+                && !SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
         if (logger.isDebugEnabled()) {
             logger.debug("-Dio.netty.noPreferDirect: {}", !DIRECT_BUFFER_PREFERRED);
         }
 
         /*
-         * We do not want to log this message if unsafe is explicitly disabled. Do not remove the explicit no unsafe
+         * We do not want to log this message if unsafe is explicitly disabled. Do not
+         * remove the explicit no unsafe
          * guard.
          */
         if (CLEANER == NOOP && !PlatformDependent0.isExplicitNoUnsafe()) {
             logger.info(
                     "Your platform does not provide complete low-level API for accessing direct buffers reliably. " +
-                    "Unless explicitly requested, heap buffer will always be preferred to avoid potential system " +
-                    "instability.");
+                            "Unless explicitly requested, heap buffer will always be preferred to avoid potential system "
+                            +
+                            "instability.");
         }
 
         final Set<String> allowedClassifiers = Collections.unmodifiableSet(
@@ -229,7 +458,7 @@ public final class PlatformDependent {
     }
 
     static void addFilesystemOsClassifiers(final Set<String> allowedClassifiers,
-                                           final Set<String> availableClassifiers) {
+            final Set<String> availableClassifiers) {
         for (final String osReleaseFileName : OS_RELEASE_FILES) {
             final File file = new File(osReleaseFileName);
             boolean found = AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
@@ -267,7 +496,8 @@ public final class PlatformDependent {
                                     }
                                 }
                             }
-                            // specification states we should only fall back if /etc/os-release does not exist
+                            // specification states we should only fall back if /etc/os-release does not
+                            // exist
                             return true;
                         }
                     } catch (SecurityException e) {
@@ -284,7 +514,8 @@ public final class PlatformDependent {
     }
 
     static boolean addPropertyOsClassifiers(Set<String> allowedClassifiers, Set<String> availableClassifiers) {
-        // empty: -Dio.netty.osClassifiers (no distro specific classifiers for native libs)
+        // empty: -Dio.netty.osClassifiers (no distro specific classifiers for native
+        // libs)
         // single ID: -Dio.netty.osClassifiers=ubuntu
         // pair ID, ID_LIKE: -Dio.netty.osClassifiers=ubuntu,debian
         // illegal otherwise
@@ -323,8 +554,9 @@ public final class PlatformDependent {
     }
 
     public static byte[] allocateUninitializedArray(int size) {
-        return UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD < 0 || UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD > size ?
-                new byte[size] : PlatformDependent0.allocateUninitializedArray(size);
+        return UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD < 0 || UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD > size
+                ? new byte[size]
+                : PlatformDependent0.allocateUninitializedArray(size);
     }
 
     /**
@@ -349,7 +581,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Return {@code true} if the current user may be a super-user. Be aware that this is just an hint and so it may
+     * Return {@code true} if the current user may be a super-user. Be aware that
+     * this is just an hint and so it may
      * return false-positives.
      */
     public static boolean maybeSuperUser() {
@@ -364,14 +597,16 @@ public final class PlatformDependent {
     }
 
     /**
-     * Returns {@code true} if and only if it is fine to enable TCP_NODELAY socket option by default.
+     * Returns {@code true} if and only if it is fine to enable TCP_NODELAY socket
+     * option by default.
      */
     public static boolean canEnableTcpNoDelayByDefault() {
         return CAN_ENABLE_TCP_NODELAY_BY_DEFAULT;
     }
 
     /**
-     * Return {@code true} if {@code sun.misc.Unsafe} was found on the classpath and can be used for accelerated
+     * Return {@code true} if {@code sun.misc.Unsafe} was found on the classpath and
+     * can be used for accelerated
      * direct memory access.
      */
     public static boolean hasUnsafe() {
@@ -388,14 +623,17 @@ public final class PlatformDependent {
     /**
      * {@code true} if and only if the platform supports unaligned access.
      *
-     * @see <a href="https://en.wikipedia.org/wiki/Segmentation_fault#Bus_error">Wikipedia on segfault</a>
+     * @see <a href=
+     *      "https://en.wikipedia.org/wiki/Segmentation_fault#Bus_error">Wikipedia
+     *      on segfault</a>
      */
     public static boolean isUnaligned() {
         return PlatformDependent0.isUnaligned();
     }
 
     /**
-     * Returns {@code true} if the platform has reliable low-level direct buffer access API and a user has not specified
+     * Returns {@code true} if the platform has reliable low-level direct buffer
+     * access API and a user has not specified
      * {@code -Dio.netty.noPreferDirect} option.
      */
     public static boolean directBufferPreferred() {
@@ -470,14 +708,16 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current
+     * platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap() {
         return new ConcurrentHashMap<K, V>();
     }
 
     /**
-     * Creates a new fastest {@link LongCounter} implementation for the current platform.
+     * Creates a new fastest {@link LongCounter} implementation for the current
+     * platform.
      */
     public static LongCounter newLongCounter() {
         if (javaVersion() >= 8) {
@@ -488,21 +728,24 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current
+     * platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity) {
         return new ConcurrentHashMap<K, V>(initialCapacity);
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current
+     * platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity, float loadFactor) {
         return new ConcurrentHashMap<K, V>(initialCapacity, loadFactor);
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current
+     * platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(
             int initialCapacity, float loadFactor, int concurrencyLevel) {
@@ -510,15 +753,18 @@ public final class PlatformDependent {
     }
 
     /**
-     * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * Creates a new fastest {@link ConcurrentMap} implementation for the current
+     * platform.
      */
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(Map<? extends K, ? extends V> map) {
         return new ConcurrentHashMap<K, V>(map);
     }
 
     /**
-     * Try to deallocate the specified direct {@link ByteBuffer}. Please note this method does nothing if
-     * the current platform does not support this operation or the specified buffer is not a direct buffer.
+     * Try to deallocate the specified direct {@link ByteBuffer}. Please note this
+     * method does nothing if
+     * the current platform does not support this operation or the specified buffer
+     * is not a direct buffer.
      */
     public static void freeDirectBuffer(ByteBuffer buffer) {
         CLEANER.freeDirectBuffer(buffer);
@@ -624,7 +870,7 @@ public final class PlatformDependent {
                     ((long) bytes[offset + 3] & 0xff) << 32 |
                     ((long) bytes[offset + 4] & 0xff) << 24 |
                     ((long) bytes[offset + 5] & 0xff) << 16 |
-                    ((long) bytes[offset + 6] & 0xff) <<  8 |
+                    ((long) bytes[offset + 6] & 0xff) << 8 |
                     (long) bytes[offset + 7] & 0xff;
         }
         return (long) bytes[offset] & 0xff |
@@ -658,42 +904,45 @@ public final class PlatformDependent {
     }
 
     /**
-     * Identical to {@link PlatformDependent0#hashCodeAsciiCompute(long, int)} but for {@link CharSequence}.
+     * Identical to {@link PlatformDependent0#hashCodeAsciiCompute(long, int)} but
+     * for {@link CharSequence}.
      */
     private static int hashCodeAsciiCompute(CharSequence value, int offset, int hash) {
         if (BIG_ENDIAN_NATIVE_ORDER) {
             return hash * HASH_CODE_C1 +
-                    // Low order int
+            // Low order int
                     hashCodeAsciiSanitizeInt(value, offset + 4) * HASH_CODE_C2 +
                     // High order int
                     hashCodeAsciiSanitizeInt(value, offset);
         }
         return hash * HASH_CODE_C1 +
-                // Low order int
+        // Low order int
                 hashCodeAsciiSanitizeInt(value, offset) * HASH_CODE_C2 +
                 // High order int
                 hashCodeAsciiSanitizeInt(value, offset + 4);
     }
 
     /**
-     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(int)} but for {@link CharSequence}.
+     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(int)} but for
+     * {@link CharSequence}.
      */
     private static int hashCodeAsciiSanitizeInt(CharSequence value, int offset) {
         if (BIG_ENDIAN_NATIVE_ORDER) {
             // mimic a unsafe.getInt call on a big endian machine
             return (value.charAt(offset + 3) & 0x1f) |
-                   (value.charAt(offset + 2) & 0x1f) << 8 |
-                   (value.charAt(offset + 1) & 0x1f) << 16 |
-                   (value.charAt(offset) & 0x1f) << 24;
+                    (value.charAt(offset + 2) & 0x1f) << 8 |
+                    (value.charAt(offset + 1) & 0x1f) << 16 |
+                    (value.charAt(offset) & 0x1f) << 24;
         }
         return (value.charAt(offset + 3) & 0x1f) << 24 |
-               (value.charAt(offset + 2) & 0x1f) << 16 |
-               (value.charAt(offset + 1) & 0x1f) << 8 |
-               (value.charAt(offset) & 0x1f);
+                (value.charAt(offset + 2) & 0x1f) << 16 |
+                (value.charAt(offset + 1) & 0x1f) << 8 |
+                (value.charAt(offset) & 0x1f);
     }
 
     /**
-     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(short)} but for {@link CharSequence}.
+     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(short)} but for
+     * {@link CharSequence}.
      */
     private static int hashCodeAsciiSanitizeShort(CharSequence value, int offset) {
         if (BIG_ENDIAN_NATIVE_ORDER) {
@@ -706,7 +955,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(byte)} but for {@link CharSequence}.
+     * Identical to {@link PlatformDependent0#hashCodeAsciiSanitize(byte)} but for
+     * {@link CharSequence}.
      */
     private static int hashCodeAsciiSanitizeByte(char value) {
         return value & 0x1f;
@@ -766,7 +1016,7 @@ public final class PlatformDependent {
 
     public static void copyMemory(byte[] src, int srcIndex, byte[] dst, int dstIndex, long length) {
         PlatformDependent0.copyMemory(src, BYTE_ARRAY_BASE_OFFSET + srcIndex,
-                                      dst, BYTE_ARRAY_BASE_OFFSET + dstIndex, length);
+                dst, BYTE_ARRAY_BASE_OFFSET + dstIndex, length);
     }
 
     public static void copyMemory(long srcAddr, byte[] dst, int dstIndex, long length) {
@@ -782,8 +1032,10 @@ public final class PlatformDependent {
     }
 
     /**
-     * Allocate a new {@link ByteBuffer} with the given {@code capacity}. {@link ByteBuffer}s allocated with
-     * this method <strong>MUST</strong> be deallocated via {@link #freeDirectNoCleaner(ByteBuffer)}.
+     * Allocate a new {@link ByteBuffer} with the given {@code capacity}.
+     * {@link ByteBuffer}s allocated with
+     * this method <strong>MUST</strong> be deallocated via
+     * {@link #freeDirectNoCleaner(ByteBuffer)}.
      */
     public static ByteBuffer allocateDirectNoCleaner(int capacity) {
         assert USE_DIRECT_BUFFER_NO_CLEANER;
@@ -799,8 +1051,10 @@ public final class PlatformDependent {
     }
 
     /**
-     * Reallocate a new {@link ByteBuffer} with the given {@code capacity}. {@link ByteBuffer}s reallocated with
-     * this method <strong>MUST</strong> be deallocated via {@link #freeDirectNoCleaner(ByteBuffer)}.
+     * Reallocate a new {@link ByteBuffer} with the given {@code capacity}.
+     * {@link ByteBuffer}s reallocated with
+     * this method <strong>MUST</strong> be deallocated via
+     * {@link #freeDirectNoCleaner(ByteBuffer)}.
      */
     public static ByteBuffer reallocateDirectNoCleaner(ByteBuffer buffer, int capacity) {
         assert USE_DIRECT_BUFFER_NO_CLEANER;
@@ -817,7 +1071,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * This method <strong>MUST</strong> only be called for {@link ByteBuffer}s that were allocated via
+     * This method <strong>MUST</strong> only be called for {@link ByteBuffer}s that
+     * were allocated via
      * {@link #allocateDirectNoCleaner(int)}.
      */
     public static void freeDirectNoCleaner(ByteBuffer buffer) {
@@ -878,43 +1133,50 @@ public final class PlatformDependent {
     }
 
     /**
-     * Compare two {@code byte} arrays for equality. For performance reasons no bounds checking on the
+     * Compare two {@code byte} arrays for equality. For performance reasons no
+     * bounds checking on the
      * parameters is performed.
      *
-     * @param bytes1 the first byte array.
-     * @param startPos1 the position (inclusive) to start comparing in {@code bytes1}.
-     * @param bytes2 the second byte array.
-     * @param startPos2 the position (inclusive) to start comparing in {@code bytes2}.
-     * @param length the amount of bytes to compare. This is assumed to be validated as not going out of bounds
-     * by the caller.
+     * @param bytes1    the first byte array.
+     * @param startPos1 the position (inclusive) to start comparing in
+     *                  {@code bytes1}.
+     * @param bytes2    the second byte array.
+     * @param startPos2 the position (inclusive) to start comparing in
+     *                  {@code bytes2}.
+     * @param length    the amount of bytes to compare. This is assumed to be
+     *                  validated as not going out of bounds
+     *                  by the caller.
      */
     public static boolean equals(byte[] bytes1, int startPos1, byte[] bytes2, int startPos2, int length) {
         if (javaVersion() > 8 && (startPos2 | startPos1 | (bytes1.length - length) | bytes2.length - length) == 0) {
             return Arrays.equals(bytes1, bytes2);
         }
-        return !hasUnsafe() || !unalignedAccess() ?
-                  equalsSafe(bytes1, startPos1, bytes2, startPos2, length) :
-                  PlatformDependent0.equals(bytes1, startPos1, bytes2, startPos2, length);
+        return !hasUnsafe() || !unalignedAccess() ? equalsSafe(bytes1, startPos1, bytes2, startPos2, length)
+                : PlatformDependent0.equals(bytes1, startPos1, bytes2, startPos2, length);
     }
 
     /**
      * Determine if a subsection of an array is zero.
-     * @param bytes The byte array.
+     * 
+     * @param bytes    The byte array.
      * @param startPos The starting index (inclusive) in {@code bytes}.
-     * @param length The amount of bytes to check for zero.
-     * @return {@code false} if {@code bytes[startPos:startsPos+length)} contains a value other than zero.
+     * @param length   The amount of bytes to check for zero.
+     * @return {@code false} if {@code bytes[startPos:startsPos+length)} contains a
+     *         value other than zero.
      */
     public static boolean isZero(byte[] bytes, int startPos, int length) {
-        return !hasUnsafe() || !unalignedAccess() ?
-                isZeroSafe(bytes, startPos, length) :
-                PlatformDependent0.isZero(bytes, startPos, length);
+        return !hasUnsafe() || !unalignedAccess() ? isZeroSafe(bytes, startPos, length)
+                : PlatformDependent0.isZero(bytes, startPos, length);
     }
 
     /**
-     * Compare two {@code byte} arrays for equality without leaking timing information.
+     * Compare two {@code byte} arrays for equality without leaking timing
+     * information.
      * For performance reasons no bounds checking on the parameters is performed.
      * <p>
-     * The {@code int} return type is intentional and is designed to allow cascading of constant time operations:
+     * The {@code int} return type is intentional and is designed to allow cascading
+     * of constant time operations:
+     * 
      * <pre>
      *     byte[] s1 = new {1, 2, 3};
      *     byte[] s2 = new {1, 2, 3};
@@ -923,52 +1185,64 @@ public final class PlatformDependent {
      *     boolean equals = (equalsConstantTime(s1, 0, s2, 0, s1.length) &
      *                       equalsConstantTime(s3, 0, s4, 0, s3.length)) != 0;
      * </pre>
-     * @param bytes1 the first byte array.
-     * @param startPos1 the position (inclusive) to start comparing in {@code bytes1}.
-     * @param bytes2 the second byte array.
-     * @param startPos2 the position (inclusive) to start comparing in {@code bytes2}.
-     * @param length the amount of bytes to compare. This is assumed to be validated as not going out of bounds
-     * by the caller.
+     * 
+     * @param bytes1    the first byte array.
+     * @param startPos1 the position (inclusive) to start comparing in
+     *                  {@code bytes1}.
+     * @param bytes2    the second byte array.
+     * @param startPos2 the position (inclusive) to start comparing in
+     *                  {@code bytes2}.
+     * @param length    the amount of bytes to compare. This is assumed to be
+     *                  validated as not going out of bounds
+     *                  by the caller.
      * @return {@code 0} if not equal. {@code 1} if equal.
      */
     public static int equalsConstantTime(byte[] bytes1, int startPos1, byte[] bytes2, int startPos2, int length) {
-        return !hasUnsafe() || !unalignedAccess() ?
-                  ConstantTimeUtils.equalsConstantTime(bytes1, startPos1, bytes2, startPos2, length) :
-                  PlatformDependent0.equalsConstantTime(bytes1, startPos1, bytes2, startPos2, length);
+        return !hasUnsafe() || !unalignedAccess()
+                ? ConstantTimeUtils.equalsConstantTime(bytes1, startPos1, bytes2, startPos2, length)
+                : PlatformDependent0.equalsConstantTime(bytes1, startPos1, bytes2, startPos2, length);
     }
 
     /**
      * Calculate a hash code of a byte array assuming ASCII character encoding.
      * The resulting hash code will be case insensitive.
-     * @param bytes The array which contains the data to hash.
+     * 
+     * @param bytes    The array which contains the data to hash.
      * @param startPos What index to start generating a hash code in {@code bytes}
-     * @param length The amount of bytes that should be accounted for in the computation.
+     * @param length   The amount of bytes that should be accounted for in the
+     *                 computation.
      * @return The hash code of {@code bytes} assuming ASCII character encoding.
-     * The resulting hash code will be case insensitive.
+     *         The resulting hash code will be case insensitive.
      */
     public static int hashCodeAscii(byte[] bytes, int startPos, int length) {
-        return !hasUnsafe() || !unalignedAccess() ?
-                hashCodeAsciiSafe(bytes, startPos, length) :
-                PlatformDependent0.hashCodeAscii(bytes, startPos, length);
+        return !hasUnsafe() || !unalignedAccess() ? hashCodeAsciiSafe(bytes, startPos, length)
+                : PlatformDependent0.hashCodeAscii(bytes, startPos, length);
     }
 
     /**
      * Calculate a hash code of a byte array assuming ASCII character encoding.
      * The resulting hash code will be case insensitive.
      * <p>
-     * This method assumes that {@code bytes} is equivalent to a {@code byte[]} but just using {@link CharSequence}
-     * for storage. The upper most byte of each {@code char} from {@code bytes} is ignored.
-     * @param bytes The array which contains the data to hash (assumed to be equivalent to a {@code byte[]}).
+     * This method assumes that {@code bytes} is equivalent to a {@code byte[]} but
+     * just using {@link CharSequence}
+     * for storage. The upper most byte of each {@code char} from {@code bytes} is
+     * ignored.
+     * 
+     * @param bytes The array which contains the data to hash (assumed to be
+     *              equivalent to a {@code byte[]}).
      * @return The hash code of {@code bytes} assuming ASCII character encoding.
-     * The resulting hash code will be case insensitive.
+     *         The resulting hash code will be case insensitive.
      */
     public static int hashCodeAscii(CharSequence bytes) {
         final int length = bytes.length();
         final int remainingBytes = length & 7;
         int hash = HASH_CODE_ASCII_SEED;
-        // Benchmarking shows that by just naively looping for inputs 8~31 bytes long we incur a relatively large
-        // performance penalty (only achieve about 60% performance of loop which iterates over each char). So because
-        // of this we take special provisions to unroll the looping for these conditions.
+        // Benchmarking shows that by just naively looping for inputs 8~31 bytes long we
+        // incur a relatively large
+        // performance penalty (only achieve about 60% performance of loop which
+        // iterates over each char). So because
+        // of this we take special provisions to unroll the looping for these
+        // conditions.
         if (length >= 32) {
             for (int i = length - 8; i >= remainingBytes; i -= 8) {
                 hash = hashCodeAsciiCompute(bytes, i, hash);
@@ -1012,7 +1286,8 @@ public final class PlatformDependent {
             Object unsafe = null;
             if (hasUnsafe()) {
                 // jctools goes through its own process of initializing unsafe; of
-                // course, this requires permissions which might not be granted to calling code, so we
+                // course, this requires permissions which might not be granted to calling code,
+                // so we
                 // must mark this block as privileged too
                 unsafe = AccessController.doPrivileged(new PrivilegedAction<Object>() {
                     @Override
@@ -1033,8 +1308,10 @@ public final class PlatformDependent {
         }
 
         static <T> Queue<T> newMpscQueue(final int maxCapacity) {
-            // Calculate the max capacity which can not be bigger than MAX_ALLOWED_MPSC_CAPACITY.
-            // This is forced by the MpscChunkedArrayQueue implementation as will try to round it
+            // Calculate the max capacity which can not be bigger than
+            // MAX_ALLOWED_MPSC_CAPACITY.
+            // This is forced by the MpscChunkedArrayQueue implementation as will try to
+            // round it
             // up to the next power of two and so will overflow otherwise.
             final int capacity = max(min(maxCapacity, MAX_ALLOWED_MPSC_CAPACITY), MIN_MAX_MPSC_CAPACITY);
             return newChunkedMpscQueue(MPSC_CHUNK_SIZE, capacity);
@@ -1047,13 +1324,15 @@ public final class PlatformDependent {
 
         static <T> Queue<T> newMpscQueue() {
             return USE_MPSC_CHUNKED_ARRAY_QUEUE ? new MpscUnboundedArrayQueue<T>(MPSC_CHUNK_SIZE)
-                                                : new MpscUnboundedAtomicArrayQueue<T>(MPSC_CHUNK_SIZE);
+                    : new MpscUnboundedAtomicArrayQueue<T>(MPSC_CHUNK_SIZE);
         }
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * Create a new {@link Queue} which is safe to use for multiple producers
+     * (different threads) and a single
      * consumer (one thread!).
+     * 
      * @return A MPSC queue which may be unbounded.
      */
     public static <T> Queue<T> newMpscQueue() {
@@ -1061,7 +1340,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * Create a new {@link Queue} which is safe to use for multiple producers
+     * (different threads) and a single
      * consumer (one thread!).
      */
     public static <T> Queue<T> newMpscQueue(final int maxCapacity) {
@@ -1069,7 +1349,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * Create a new {@link Queue} which is safe to use for multiple producers
+     * (different threads) and a single
      * consumer (one thread!).
      * The queue will grow and shrink its capacity in units of the given chunk size.
      */
@@ -1078,7 +1359,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for single producer (one thread!) and a single
+     * Create a new {@link Queue} which is safe to use for single producer (one
+     * thread!) and a single
      * consumer (one thread!).
      */
     public static <T> Queue<T> newSpscQueue() {
@@ -1086,7 +1368,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * Create a new {@link Queue} which is safe to use for multiple producers
+     * (different threads) and a single
      * consumer (one thread!) with the given fixes {@code capacity}.
      */
     public static <T> Queue<T> newFixedMpscQueue(int capacity) {
@@ -1094,16 +1377,19 @@ public final class PlatformDependent {
     }
 
     /**
-     * Create a new un-padded {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * Create a new un-padded {@link Queue} which is safe to use for multiple
+     * producers (different threads) and a single
      * consumer (one thread!) with the given fixes {@code capacity}.<br>
-     * This should be preferred to {@link #newFixedMpscQueue(int)} when the queue is not to be heavily contended.
+     * This should be preferred to {@link #newFixedMpscQueue(int)} when the queue is
+     * not to be heavily contended.
      */
     public static <T> Queue<T> newFixedMpscUnpaddedQueue(int capacity) {
         return hasUnsafe() ? new MpscUnpaddedArrayQueue<T>(capacity) : new MpscAtomicUnpaddedArrayQueue<T>(capacity);
     }
 
     /**
-     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and multiple
+     * Create a new {@link Queue} which is safe to use for multiple producers
+     * (different threads) and multiple
      * consumers with the given fixes {@code capacity}.
      */
     public static <T> Queue<T> newFixedMpmcQueue(int capacity) {
@@ -1144,7 +1430,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Return a {@link Random} which is not-threadsafe and so can only be used from the same thread.
+     * Return a {@link Random} which is not-threadsafe and so can only be used from
+     * the same thread.
      */
     public static Random threadLocalRandom() {
         return RANDOM_PROVIDER.current();
@@ -1171,7 +1458,8 @@ public final class PlatformDependent {
         if (isWindows()) {
             return "Administrator".equals(username);
         }
-        // Check for root and toor as some BSDs have a toor user that is basically the same as root.
+        // Check for root and toor as some BSDs have a toor user that is basically the
+        // same as root.
         return "root".equals(username) || "toor".equals(username);
     }
 
@@ -1203,8 +1491,10 @@ public final class PlatformDependent {
     }
 
     /**
-     * Returns {@code true} if the running JVM is either <a href="https://developer.ibm.com/javasdk/">IBM J9</a> or
-     * <a href="https://www.eclipse.org/openj9/">Eclipse OpenJ9</a>, {@code false} otherwise.
+     * Returns {@code true} if the running JVM is either
+     * <a href="https://developer.ibm.com/javasdk/">IBM J9</a> or
+     * <a href="https://www.eclipse.org/openj9/">Eclipse OpenJ9</a>, {@code false}
+     * otherwise.
      */
     public static boolean isJ9Jvm() {
         return IS_J9_JVM;
@@ -1216,7 +1506,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Returns {@code true} if the running JVM is <a href="https://www.ikvm.net">IKVM.NET</a>, {@code false} otherwise.
+     * Returns {@code true} if the running JVM is
+     * <a href="https://www.ikvm.net">IKVM.NET</a>, {@code false} otherwise.
      */
     public static boolean isIkvmDotNet() {
         return IS_IVKVM_DOT_NET;
@@ -1232,15 +1523,17 @@ public final class PlatformDependent {
         Pattern pattern = MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN;
         if (pattern == null) {
             pattern = Pattern.compile("\\s*-XX:MaxDirectMemorySize\\s*=\\s*([0-9]+)\\s*([kKmMgG]?)\\s*$");
-            MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN =  pattern;
+            MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN = pattern;
         }
         return pattern;
     }
 
     /**
-     * Compute an estimate of the maximum amount of direct memory available to this JVM.
+     * Compute an estimate of the maximum amount of direct memory available to this
+     * JVM.
      * <p>
-     * The computation is not cached, so you probably want to use {@link #maxDirectMemory()} instead.
+     * The computation is not cached, so you probably want to use
+     * {@link #maxDirectMemory()} instead.
      * <p>
      * This will produce debug log output when called.
      *
@@ -1256,13 +1549,14 @@ public final class PlatformDependent {
         try {
             systemClassLoader = getSystemClassLoader();
 
-            // When using IBM J9 / Eclipse OpenJ9 we should not use VM.maxDirectMemory() as it not reflects the
+            // When using IBM J9 / Eclipse OpenJ9 we should not use VM.maxDirectMemory() as
+            // it not reflects the
             // correct value.
             // See:
-            //  - https://github.com/netty/netty/issues/7654
+            // - https://github.com/netty/netty/issues/7654
             String vmName = SystemPropertyUtil.get("java.vm.name", "").toLowerCase();
             if (!vmName.startsWith("ibm j9") &&
-                    // https://github.com/eclipse/openj9/blob/openj9-0.8.0/runtime/include/vendor_version.h#L53
+            // https://github.com/eclipse/openj9/blob/openj9-0.8.0/runtime/include/vendor_version.h#L53
                     !vmName.startsWith("eclipse openj9")) {
                 // Try to get from sun.misc.VM.maxDirectMemory() which should be most accurate.
                 Class<?> vmClass = Class.forName("sun.misc.VM", true, systemClassLoader);
@@ -1292,7 +1586,7 @@ public final class PlatformDependent {
 
             Pattern maxDirectMemorySizeArgPattern = getMaxDirectMemorySizeArgPattern();
 
-            for (int i = vmArgs.size() - 1; i >= 0; i --) {
+            for (int i = vmArgs.size() - 1; i >= 0; i--) {
                 Matcher m = maxDirectMemorySizeArgPattern.matcher(vmArgs.get(i));
                 if (!m.matches()) {
                     continue;
@@ -1300,13 +1594,16 @@ public final class PlatformDependent {
 
                 maxDirectMemory = Long.parseLong(m.group(1));
                 switch (m.group(2).charAt(0)) {
-                    case 'k': case 'K':
+                    case 'k':
+                    case 'K':
                         maxDirectMemory *= 1024;
                         break;
-                    case 'm': case 'M':
+                    case 'm':
+                    case 'M':
                         maxDirectMemory *= 1024 * 1024;
                         break;
-                    case 'g': case 'G':
+                    case 'g':
+                    case 'G':
                         maxDirectMemory *= 1024 * 1024 * 1024;
                         break;
                     default:
@@ -1439,7 +1736,8 @@ public final class PlatformDependent {
             logger.debug("-Dio.netty.bitMode: {} (os.arch: {})", bitMode, arch);
         }
 
-        // Last resort: guess from VM name and then fall back to most common 64-bit mode.
+        // Last resort: guess from VM name and then fall back to most common 64-bit
+        // mode.
         String vm = SystemPropertyUtil.get("java.vm.name", "").toLowerCase(Locale.US);
         Pattern bitPattern = Pattern.compile("([1-9][0-9]+)-?bit");
         Matcher m = bitPattern.matcher(vm);
@@ -1494,28 +1792,28 @@ public final class PlatformDependent {
         for (int i = startPos - 8 + length; i >= end; i -= 8) {
             hash = PlatformDependent0.hashCodeAsciiCompute(getLongSafe(bytes, i), hash);
         }
-        switch(remainingBytes) {
-        case 7:
-            return ((hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
-                          * HASH_CODE_C2 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos + 1)))
-                          * HASH_CODE_C1 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 3));
-        case 6:
-            return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos)))
-                         * HASH_CODE_C2 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 2));
-        case 5:
-            return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
-                         * HASH_CODE_C2 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 1));
-        case 4:
-            return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos));
-        case 3:
-            return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
-                         * HASH_CODE_C2 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos + 1));
-        case 2:
-            return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos));
-        case 1:
-            return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]);
-        default:
-            return hash;
+        switch (remainingBytes) {
+            case 7:
+                return ((hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
+                        * HASH_CODE_C2 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos + 1)))
+                        * HASH_CODE_C1 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 3));
+            case 6:
+                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos)))
+                        * HASH_CODE_C2 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 2));
+            case 5:
+                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
+                        * HASH_CODE_C2 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos + 1));
+            case 4:
+                return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getIntSafe(bytes, startPos));
+            case 3:
+                return (hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]))
+                        * HASH_CODE_C2 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos + 1));
+            case 2:
+                return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(getShortSafe(bytes, startPos));
+            case 1:
+                return hash * HASH_CODE_C1 + hashCodeAsciiSanitize(bytes[startPos]);
+            default:
+                return hash;
         }
     }
 
@@ -1557,7 +1855,8 @@ public final class PlatformDependent {
     }
 
     /**
-     * Adds only those classifier strings to <tt>dest</tt> which are present in <tt>allowed</tt>.
+     * Adds only those classifier strings to <tt>dest</tt> which are present in
+     * <tt>allowed</tt>.
      *
      * @param allowed          allowed classifiers
      * @param dest             destination set
