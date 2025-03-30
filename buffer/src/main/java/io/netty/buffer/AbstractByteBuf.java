@@ -15,6 +15,9 @@
  */
 package io.netty.buffer;
 
+import static io.netty.util.internal.MathUtil.isOutOfBounds;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -31,9 +34,7 @@ import io.netty.util.CharsetUtil;
 import io.netty.util.IllegalReferenceCountException;
 import io.netty.util.ResourceLeakDetector;
 import io.netty.util.ResourceLeakDetectorFactory;
-import static io.netty.util.internal.MathUtil.isOutOfBounds;
 import io.netty.util.internal.ObjectUtil;
-import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.SystemPropertyUtil;

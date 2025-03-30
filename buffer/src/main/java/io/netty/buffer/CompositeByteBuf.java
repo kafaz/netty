@@ -15,6 +15,8 @@
  */
 package io.netty.buffer;
 
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -37,7 +39,6 @@ import io.netty.util.IllegalReferenceCountException;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.EmptyArrays;
 import io.netty.util.internal.ObjectUtil;
-import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import io.netty.util.internal.RecyclableArrayList;
 
 /**

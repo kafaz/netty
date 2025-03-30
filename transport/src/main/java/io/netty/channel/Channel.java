@@ -15,6 +15,9 @@
  */
 package io.netty.channel;
 
+import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.socket.DatagramChannel;
@@ -22,9 +25,6 @@ import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.util.AttributeMap;
-
-import java.net.InetSocketAddress;
-import java.net.SocketAddress;
 
 
 /**

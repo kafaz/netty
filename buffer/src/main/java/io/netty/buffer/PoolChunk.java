@@ -15,14 +15,13 @@
  */
 package io.netty.buffer;
 
-import io.netty.util.internal.LongCounter;
-import io.netty.util.internal.PlatformDependent;
-
 import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.Deque;
-import java.util.PriorityQueue;
 import java.util.concurrent.locks.ReentrantLock;
+
+import io.netty.util.internal.LongCounter;
+import io.netty.util.internal.PlatformDependent;
 
 /**
  * PoolChunk中PageRun/PoolSubpage分配算法的详细描述
@@ -166,63 +165,65 @@ import java.util.concurrent.locks.ReentrantLock;
  * @see SizeClasses
  */
 final class PoolChunk<T> implements PoolChunkMetric {
-    private static final int SIZE_BIT_LENGTH = 15;
-    private static final int INUSED_BIT_LENGTH = 1;
-    private static final int SUBPAGE_BIT_LENGTH = 1;
-    private static final int BITMAP_IDX_BIT_LENGTH = 32;
+    // 用于位操作的常量，定义内存管理中各种标志位的长度
+    private static final int SIZE_BIT_LENGTH = 15; // 大小字段的位长度
+    private static final int INUSED_BIT_LENGTH = 1; // 使用标志的位长度
+    private static final int SUBPAGE_BIT_LENGTH = 1; // 子页标志的位长度
+    private static final int BITMAP_IDX_BIT_LENGTH = 32; // 位图索引的位长度
 
-    static final int IS_SUBPAGE_SHIFT = BITMAP_IDX_BIT_LENGTH;
-    static final int IS_USED_SHIFT = SUBPAGE_BIT_LENGTH + IS_SUBPAGE_SHIFT;
-    static final int SIZE_SHIFT = INUSED_BIT_LENGTH + IS_USED_SHIFT;
-    static final int RUN_OFFSET_SHIFT = SIZE_BIT_LENGTH + SIZE_SHIFT;
+    // 位移常量，用于构建和解析内存句柄
+    static final int IS_SUBPAGE_SHIFT = BITMAP_IDX_BIT_LENGTH; // 子页标志的位移
+    static final int IS_USED_SHIFT = SUBPAGE_BIT_LENGTH + IS_SUBPAGE_SHIFT; // 使用标志的位移
+    static final int SIZE_SHIFT = INUSED_BIT_LENGTH + IS_USED_SHIFT; // 大小字段的位移
+    static final int RUN_OFFSET_SHIFT = SIZE_BIT_LENGTH + SIZE_SHIFT; // 运行偏移量的位移
 
-    final PoolArena<T> arena;
-    final Object base;
-    final T memory;
-    final boolean unpooled;
+    final PoolArena<T> arena; // 所属的内存竞技场
+    final Object base; // 基础对象，用于内存访问
+    final T memory; // 实际内存对象
+    final boolean unpooled; // 是否不使用池化
+    final int pageSize; // 页面大小
+    final int pageShifts; // 页大小的位移值，用于地址计算
+    final int chunkSize; // 块大小
+    final int maxPageIdx; // 最大页索引
+    int freeBytes; // 可用字节数
 
-    /**
-     * store the first page and last page of each avail run
-     */
+    // 存储每个可用运行的第一页和最后一页
     private final LongLongHashMap runsAvailMap;
 
-    /**
-     * manage all avail runs
-     */
+    // 管理所有可用的运行区域
     private final IntPriorityQueue[] runsAvail;
 
+    // 线程安全锁
     private final ReentrantLock runsAvailLock;
 
-    /**
-     * manage all subpages in this chunk
-     */
+    // 管理块中的所有子页
     private final PoolSubpage<T>[] subpages;
 
     /**
-     * Accounting of pinned memory – memory that is currently in use by ByteBuf instances.
+     * Accounting of pinned memory – memory that is currently in use by ByteBuf
+     * instances.
      */
     private final LongCounter pinnedBytes = PlatformDependent.newLongCounter();
 
-    final int pageSize;
-    final int pageShifts;
-    final int chunkSize;
-    final int maxPageIdx;
-
-    // Use as cache for ByteBuffer created from the memory. These are just duplicates and so are only a container
-    // around the memory itself. These are often needed for operations within the Pooled*ByteBuf and so
-    // may produce extra GC, which can be greatly reduced by caching the duplicates.
-    //
-    // This may be null if the PoolChunk is unpooled as pooling the ByteBuffer instances does not make any sense here.
+    /**
+     * 用作从内存创建的 ByteBuffer 的缓存。这些只是副本，因此只是
+     * 围绕内存本身的容器。这些在 Pooled*ByteBuf 内的操作中经常需要，
+     * 所以可能产生额外的垃圾回收，通过缓存这些副本可以大大减少垃圾回收。
+     *
+     * 如果 PoolChunk 是非池化的，这个字段可能为 null，因为在这种情况下
+     * 池化 ByteBuffer 实例没有任何意义。
+     */
     private final Deque<ByteBuffer> cachedNioBuffers;
 
-    int freeBytes;
-
+    // 指向父级块列表的引用
     PoolChunkList<T> parent;
+    // 链表前一个块的引用
     PoolChunk<T> prev;
+    // 链表后一个块的引用
     PoolChunk<T> next;
 
     // TODO: Test if adding padding helps under contention
-    //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
+    // private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
     @SuppressWarnings("unchecked")
     PoolChunk(PoolArena<T> arena, Object base, T memory, int pageSize, int pageShifts, int chunkSize, int maxPageIdx) {
@@ -241,7 +242,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
         runsAvailMap = new LongLongHashMap(-1);
         subpages = new PoolSubpage[chunkSize >> pageShifts];
 
-        //insert initial run, offset = 0, pages = chunkSize / pageSize
+        // insert initial run, offset = 0, pages = chunkSize / pageSize
         int pages = chunkSize >> pageShifts;
         long initHandle = (long) pages << SIZE_SHIFT;
         insertAvailRun(0, pages, initHandle);
@@ -280,10 +281,10 @@ final class PoolChunk<T> implements PoolChunkMetric {
         assert isRun(handle);
         queue.offer((int) (handle >> BITMAP_IDX_BIT_LENGTH));
 
-        //insert first page of run
+        // insert first page of run
         insertAvailRun0(runOffset, handle);
         if (pages > 1) {
-            //insert last page of run
+            // insert last page of run
             insertAvailRun0(lastPage(runOffset, pages), handle);
         }
     }
@@ -302,10 +303,10 @@ final class PoolChunk<T> implements PoolChunkMetric {
     private void removeAvailRun0(long handle) {
         int runOffset = runOffset(handle);
         int pages = runPages(handle);
-        //remove first page of run
+        // remove first page of run
         runsAvailMap.remove(runOffset);
         if (pages > 1) {
-            //remove last page of run
+            // remove last page of run
             runsAvailMap.remove(lastPage(runOffset, pages));
         }
     }
@@ -351,15 +352,16 @@ final class PoolChunk<T> implements PoolChunkMetric {
         if (sizeIdx <= arena.sizeClass.smallMaxSizeIdx) {
             final PoolSubpage<T> nextSub;
             // small
-            // Obtain the head of the PoolSubPage pool that is owned by the PoolArena and synchronize on it.
+            // Obtain the head of the PoolSubPage pool that is owned by the PoolArena and
+            // synchronize on it.
             // This is need as we may add it back and so alter the linked-list structure.
             PoolSubpage<T> head = arena.smallSubpagePools[sizeIdx];
             head.lock();
             try {
                 nextSub = head.next;
                 if (nextSub != head) {
-                    assert nextSub.doNotDestroy && nextSub.elemSize == arena.sizeClass.sizeIdx2size(sizeIdx) :
-                            "doNotDestroy=" + nextSub.doNotDestroy + ", elemSize=" + nextSub.elemSize + ", sizeIdx=" +
+                    assert nextSub.doNotDestroy && nextSub.elemSize == arena.sizeClass.sizeIdx2size(sizeIdx)
+                            : "doNotDestroy=" + nextSub.doNotDestroy + ", elemSize=" + nextSub.elemSize + ", sizeIdx=" +
                                     sizeIdx;
                     handle = nextSub.allocate();
                     assert handle >= 0;
@@ -386,7 +388,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
             assert !isSubpage(handle);
         }
 
-        ByteBuffer nioBuffer = cachedNioBuffers != null? cachedNioBuffers.pollLast() : null;
+        ByteBuffer nioBuffer = cachedNioBuffers != null ? cachedNioBuffers.pollLast() : null;
         initBuf(buf, nioBuffer, handle, reqCapacity, cache);
         return true;
     }
@@ -397,13 +399,13 @@ final class PoolChunk<T> implements PoolChunkMetric {
 
         runsAvailLock.lock();
         try {
-            //find first queue which has at least one big enough run
+            // find first queue which has at least one big enough run
             int queueIdx = runFirstBestFit(pageIdx);
             if (queueIdx == -1) {
                 return -1;
             }
 
-            //get run with min offset in this queue
+            // get run with min offset in this queue
             IntPriorityQueue queue = runsAvail[queueIdx];
             long handle = queue.poll();
             assert handle != IntPriorityQueue.NO_VALUE;
@@ -429,7 +431,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
 
         final int elemSize = arena.sizeClass.sizeIdx2size(sizeIdx);
 
-        //find lowest common multiple of pageSize and elemSize
+        // find lowest common multiple of pageSize and elemSize
         do {
             runSize += pageSize;
             nElements = runSize / elemSize;
@@ -480,24 +482,25 @@ final class PoolChunk<T> implements PoolChunkMetric {
             return toRunHandle(runOffset, needPages, 1);
         }
 
-        //mark it as used
+        // mark it as used
         handle |= 1L << IS_USED_SHIFT;
         return handle;
     }
 
     /**
-     * Create / initialize a new PoolSubpage of normCapacity. Any PoolSubpage created / initialized here is added to
+     * Create / initialize a new PoolSubpage of normCapacity. Any PoolSubpage
+     * created / initialized here is added to
      * subpage pool in the PoolArena that owns this PoolChunk.
      *
      * @param sizeIdx sizeIdx of normalized size
-     * @param head head of subpages
+     * @param head    head of subpages
      *
      * @return index in memoryMap
      */
     private long allocateSubpage(int sizeIdx, PoolSubpage<T> head) {
-        //allocate a new run
+        // allocate a new run
         int runSize = calculateRunSize(sizeIdx);
-        //runSize must be multiples of pageSize
+        // runSize must be multiples of pageSize
         long runHandle = allocateRun(runSize);
         if (runHandle < 0) {
             return -1;
@@ -515,9 +518,12 @@ final class PoolChunk<T> implements PoolChunkMetric {
     }
 
     /**
-     * Free a subpage or a run of pages When a subpage is freed from PoolSubpage, it might be added back to subpage pool
-     * of the owning PoolArena. If the subpage pool in PoolArena has at least one other PoolSubpage of given elemSize,
-     * we can completely free the owning Page so it is available for subsequent allocations
+     * Free a subpage or a run of pages When a subpage is freed from PoolSubpage, it
+     * might be added back to subpage pool
+     * of the owning PoolArena. If the subpage pool in PoolArena has at least one
+     * other PoolSubpage of given elemSize,
+     * we can completely free the owning Page so it is available for subsequent
+     * allocations
      *
      * @param handle handle to free
      */
@@ -527,13 +533,14 @@ final class PoolChunk<T> implements PoolChunkMetric {
             PoolSubpage<T> subpage = subpages[sIdx];
             assert subpage != null;
             PoolSubpage<T> head = subpage.chunk.arena.smallSubpagePools[subpage.headIndex];
-            // Obtain the head of the PoolSubPage pool that is owned by the PoolArena and synchronize on it.
+            // Obtain the head of the PoolSubPage pool that is owned by the PoolArena and
+            // synchronize on it.
             // This is need as we may add it back and so alter the linked-list structure.
             head.lock();
             try {
                 assert subpage.doNotDestroy;
                 if (subpage.free(head, bitmapIdx(handle))) {
-                    //the subpage is still used, do not free it
+                    // the subpage is still used, do not free it
                     return;
                 }
                 assert !subpage.doNotDestroy;
@@ -545,16 +552,16 @@ final class PoolChunk<T> implements PoolChunkMetric {
         }
 
         int runSize = runSize(pageShifts, handle);
-        //start free run
+        // start free run
         runsAvailLock.lock();
         try {
             // collapse continuous runs, successfully collapsed runs
             // will be removed from runsAvail and runsAvailMap
             long finalRun = collapseRuns(handle);
 
-            //set run as not used
+            // set run as not used
             finalRun &= ~(1L << IS_USED_SHIFT);
-            //if it is a subpage, set it to run
+            // if it is a subpage, set it to run
             finalRun &= ~(1L << IS_SUBPAGE_SHIFT);
 
             insertAvailRun(runOffset(finalRun), runPages(finalRun), finalRun);
@@ -564,7 +571,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
         }
 
         if (nioBuffer != null && cachedNioBuffers != null &&
-            cachedNioBuffers.size() < PooledByteBufAllocator.DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK) {
+                cachedNioBuffers.size() < PooledByteBufAllocator.DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK) {
             cachedNioBuffers.offer(nioBuffer);
         }
     }
@@ -586,9 +593,9 @@ final class PoolChunk<T> implements PoolChunkMetric {
             int pastOffset = runOffset(pastRun);
             int pastPages = runPages(pastRun);
 
-            //is continuous
+            // is continuous
             if (pastRun != handle && pastOffset + pastPages == runOffset) {
-                //remove past run
+                // remove past run
                 removeAvailRun(pastRun);
                 handle = toRunHandle(pastOffset, pastPages + runPages, 0);
             } else {
@@ -610,9 +617,9 @@ final class PoolChunk<T> implements PoolChunkMetric {
             int nextOffset = runOffset(nextRun);
             int nextPages = runPages(nextRun);
 
-            //is continuous
+            // is continuous
             if (nextRun != handle && runOffset + runPages == nextOffset) {
-                //remove next run
+                // remove next run
                 removeAvailRun(nextRun);
                 handle = toRunHandle(runOffset, runPages + nextPages, 0);
             } else {
@@ -623,12 +630,12 @@ final class PoolChunk<T> implements PoolChunkMetric {
 
     private static long toRunHandle(int runOffset, int runPages, int inUsed) {
         return (long) runOffset << RUN_OFFSET_SHIFT
-               | (long) runPages << SIZE_SHIFT
-               | (long) inUsed << IS_USED_SHIFT;
+                | (long) runPages << SIZE_SHIFT
+                | (long) inUsed << IS_USED_SHIFT;
     }
 
     void initBuf(PooledByteBuf<T> buf, ByteBuffer nioBuffer, long handle, int reqCapacity,
-                 PoolThreadCache threadCache) {
+            PoolThreadCache threadCache) {
         if (isSubpage(handle)) {
             initBufWithSubpage(buf, nioBuffer, handle, reqCapacity, threadCache);
         } else {
@@ -639,7 +646,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
     }
 
     void initBufWithSubpage(PooledByteBuf<T> buf, ByteBuffer nioBuffer, long handle, int reqCapacity,
-                            PoolThreadCache threadCache) {
+            PoolThreadCache threadCache) {
         int runOffset = runOffset(handle);
         int bitmapIdx = bitmapIdx(handle);
 
