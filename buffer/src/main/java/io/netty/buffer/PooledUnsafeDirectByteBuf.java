@@ -29,12 +29,52 @@ import java.nio.ByteBuffer;
 final class PooledUnsafeDirectByteBuf extends PooledByteBuf<ByteBuffer> {
     private static final ObjectPool<PooledUnsafeDirectByteBuf> RECYCLER = ObjectPool.newPool(
             new ObjectCreator<PooledUnsafeDirectByteBuf>() {
-        @Override
-        public PooledUnsafeDirectByteBuf newObject(Handle<PooledUnsafeDirectByteBuf> handle) {
-            return new PooledUnsafeDirectByteBuf(handle, 0);
-        }
-    });
+                @Override
+                public PooledUnsafeDirectByteBuf newObject(Handle<PooledUnsafeDirectByteBuf> handle) {
+                    return new PooledUnsafeDirectByteBuf(handle, 0);
+                }
+            });
 
+    /**
+     * 从对象回收池中获取一个PooledUnsafeDirectByteBuf实例并准备重用。
+     * <p>
+     * 该方法是Netty内存优化的关键实现之一，通过对象复用减少了对象创建和GC压力。
+     * 而不是每次需要缓冲区时都创建新实例，此方法从预先创建的对象池(RECYCLER)中
+     * 获取一个可重用的对象，显著提高了内存分配效率。
+     * </p>
+     * 
+     * <h3>对象回收机制：</h3>
+     * <p>
+     * 该方法利用Netty的RECYCLER机制实现对象复用：
+     * <ol>
+     * <li>从RECYCLER对象池中获取一个之前使用过并已释放的PooledUnsafeDirectByteBuf实例</li>
+     * <li>调用reuse()方法重置该实例的状态，准备再次使用</li>
+     * <li>当缓冲区使用完毕后，会被释放回对象池而不是被垃圾回收</li>
+     * </ol>
+     * </p>
+     * 
+     * <h3>性能优势：</h3>
+     * <p>
+     * <ul>
+     * <li>减少内存分配/释放开销</li>
+     * <li>降低GC压力和暂停时间</li>
+     * <li>提高内存分配的吞吐量</li>
+     * <li>减少内存碎片</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>线程安全性：</h3>
+     * <p>
+     * 内部使用的RECYCLER是线程本地的，因此该方法从对象池获取对象的操作是线程安全的。
+     * 但返回的缓冲区实例本身不是线程安全的，多线程使用同一个缓冲区实例需要外部同步。
+     * </p>
+     * 
+     * @param maxCapacity 缓冲区的最大容量（以字节为单位）
+     * @return 一个已重置状态、准备好使用的PooledUnsafeDirectByteBuf实例
+     * 
+     * @see io.netty.util.Recycler
+     * @see PooledUnsafeDirectByteBuf#reuse(int)
+     */
     static PooledUnsafeDirectByteBuf newInstance(int maxCapacity) {
         PooledUnsafeDirectByteBuf buf = RECYCLER.get();
         buf.reuse(maxCapacity);
@@ -49,7 +89,7 @@ final class PooledUnsafeDirectByteBuf extends PooledByteBuf<ByteBuffer> {
 
     @Override
     void init(PoolChunk<ByteBuffer> chunk, ByteBuffer nioBuffer,
-              long handle, int offset, int length, int maxLength, PoolThreadCache cache) {
+            long handle, int offset, int length, int maxLength, PoolThreadCache cache) {
         super.init(chunk, nioBuffer, handle, offset, length, maxLength, cache);
         initMemoryAddress();
     }

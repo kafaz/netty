@@ -239,42 +239,75 @@ abstract class PooledByteBuf<T> extends AbstractReferenceCountedByteBuf {
     }
 
     /**
-     * 调整此缓冲区的容量
-     * 根据需要可能会重新分配内存
+     * 调整此缓冲区的容量。根据实际情况，可能通过调整已有内存范围或重新分配更大的内存块来实现。
+     * <p>
+     * 此方法是PooledByteBuf容量调整的核心实现，针对池化内存的特性进行了多种优化：
+     * <ul>
+     *   <li>如果新容量等于当前容量，则不做任何改变</li>
+     *   <li>如果是池化内存块且满足特定条件，尝试在不重新分配的情况下调整容量</li>
+     *   <li>如果无法通过简单调整实现，则通过Arena重新分配更合适的内存块</li>
+     * </ul>
+     * ----- 参数说明 -----
+     * <ul>
+     *   <li>length: 当前ByteBuf的实际容量</li>
+     *   <li>maxLength: 当前内存块中最大可用的长度</li>
+     *   <li>chunk: 当前ByteBuf所属的内存块</li>
+     *   <li>chunk.unpooled: 内存块是否非池化的标识</li>
+     *   <li>chunk.arena: 管理内存分配的Arena实例</li>
+     * </ul>
+     *</p>
+     * @param newCapacity 请求的新容量大小（字节数）
+     * @return 此缓冲区实例，方便链式调用
      * 
-     * @param newCapacity 新的容量大小
-     * @return 此缓冲区实例
+     * @throws IllegalArgumentException 如果newCapacity小于0或大于最大允许容量
+     * @throws IllegalStateException 如果缓冲区已被释放
+     * 
+     * @see PoolArena#reallocate(PooledByteBuf, int)
      */
     @Override
     public final ByteBuf capacity(int newCapacity) {
-        // 如果新容量等于当前容量，直接返回
+        // length: 当前ByteBuf的实际容量（字节数）
+        // 如果新容量与当前容量相同，无需任何操作
         if (newCapacity == length) {
+            // ensureAccessible(): 确保此缓冲区未被释放且可访问
             ensureAccessible();
             return this;
         }
-        // 检查新容量是否合法
+        
+        // 检查新容量是否在有效范围内（大于等于0且不超过最大允许容量）
         checkNewCapacity(newCapacity);
         
-        // 非unpooled的块可以尝试优化扩容
+        // chunk: 当前ByteBuf所属的内存块，包含实际的内存数据
+        // chunk.unpooled: 标识此内存块是否为非池化（true表示非池化，不受内存池管理）
         if (!chunk.unpooled) {
-            // 扩容情况：如果新容量小于等于maxLength，可以直接调整长度
+            // 扩容情况处理：新容量大于当前容量
             if (newCapacity > length) {
+                // maxLength: 当前内存块中最大可用的长度，由内存分配时确定
+                // 如果新容量不超过最大可用长度，可以直接扩展而无需重新分配
                 if (newCapacity <= maxLength) {
                     length = newCapacity;
                     return this;
                 }
             } 
-            // 缩容情况：如果新容量大于maxLength的一半，或者符合特定条件，可以直接调整长度
-            else if (newCapacity > maxLength >>> 1 &&
+            // 缩容情况处理：新容量小于当前容量
+            else if (newCapacity > maxLength >>> 1 &&  // 新容量大于最大长度的一半
                     (maxLength > 512 || newCapacity > maxLength - 16)) {
-                // 这里newCapacity < length
+                // 对于较大的缓冲区(maxLength>512)或缩减幅度较小的情况
+                // 直接调整长度而不重新分配，这是一种性能优化
                 length = newCapacity;
+                // 确保读写索引不超过新容量
                 trimIndicesToCapacity(newCapacity);
                 return this;
             }
         }
 
-        // 如果无法通过简单调整长度完成，需要重新分配内存
+        // 以下情况需要重新分配内存：
+        // 1. 非池化内存块
+        // 2. 扩容超出了当前最大可用长度
+        // 3. 缩容幅度较大，不满足优化条件
+        
+        // chunk.arena: 管理内存分配的Arena实例
+        // reallocate: 重新分配适合新容量的内存块，并处理数据迁移
         chunk.arena.reallocate(this, newCapacity);
         return this;
     }

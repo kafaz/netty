@@ -77,15 +77,60 @@ import static java.lang.Math.max;
 abstract class PoolArena<T> implements PoolArenaMetric {
     private static final boolean HAS_UNSAFE = PlatformDependent.hasUnsafe();
 
+    /**
+     * PoolArena类核心属性详解
+     * <p>
+     * PoolArena是Netty内存池系统的核心组件，负责内存的分配、管理和回收。
+     * 以下是各属性的详细解释及其在Netty内存分配中的作用。
+     * </p>
+     */
+
+    /**
+     * 内存大小分类枚举
+     * <p>
+     * 用于区分不同大小类别的内存分配策略
+     * </p>
+     */
     enum SizeClass {
-        Small,
-        Normal
+        Small, // 小内存块，通常<=4KB，使用subpage级别分配
+        Normal // 普通内存块，通常4KB-16MB，使用页级别分配
     }
 
+    /**
+     * 分配器父对象
+     * <p>
+     * 指向创建此Arena的PooledByteBufAllocator实例
+     * 用于访问全局配置和获取线程缓存
+     * </p>
+     */
     final PooledByteBufAllocator parent;
 
+    /**
+     * 小对象内存页池数组
+     * <p>
+     * 存储不同大小规格的小内存页池
+     * 每个元素是一个双向链表结构，用于快速分配和回收小内存块
+     * 在高并发场景下，减少内存碎片和提高分配效率
+     * </p>
+     */
     final PoolSubpage<T>[] smallSubpagePools;
 
+    /**
+     * 不同使用率的内存块列表
+     * <p>
+     * PoolChunkList按内存块使用率分类管理，构成多级链表结构：
+     * q050: 使用率50%-100%的内存块
+     * q025: 使用率25%-75%的内存块
+     * q000: 使用率1%-50%的内存块
+     * qInit: 新创建的内存块，使用率最低
+     * q075: 使用率75%-100%的内存块
+     * q100: 使用率100%的内存块，已完全分配
+     * </p>
+     * <p>
+     * 这种分级管理机制使Netty能够优先分配使用率较高的内存块，
+     * 提高内存利用率，减少碎片，并根据使用率动态调整内存块的位置
+     * </p>
+     */
     private final PoolChunkList<T> q050;
     private final PoolChunkList<T> q025;
     private final PoolChunkList<T> q000;
@@ -93,31 +138,68 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     private final PoolChunkList<T> q075;
     private final PoolChunkList<T> q100;
 
+    /**
+     * 内存块列表指标集合
+     * <p>
+     * 提供只读的内存块列表统计信息
+     * 用于监控和调试内存使用情况
+     * </p>
+     */
     private final List<PoolChunkListMetric> chunkListMetrics;
 
-    // Metrics for allocations and deallocations
+    /**
+     * 分配和释放统计计数器
+     * <p>
+     * allocationsNormal: 普通内存分配次数
+     * allocationsSmall: 小内存分配次数，使用LongCounter保证线程安全
+     * allocationsHuge: 大内存分配次数，使用LongCounter保证线程安全
+     * activeBytesHuge: 当前活跃的大内存字节总数
+     * deallocationsSmall: 小内存释放次数
+     * deallocationsNormal: 普通内存释放次数
+     * deallocationsHuge: 大内存释放次数，使用LongCounter保证线程安全
+     * </p>
+     * <p>
+     * 这些计数器用于：
+     * 1. 监控内存分配和释放的频率
+     * 2. 检测内存泄漏
+     * 3. 优化内存分配策略
+     * 4. 提供运行时指标
+     * </p>
+     */
     private long allocationsNormal;
-    // We need to use the LongCounter here as this is not guarded via synchronized
-    // block.
     private final LongCounter allocationsSmall = PlatformDependent.newLongCounter();
     private final LongCounter allocationsHuge = PlatformDependent.newLongCounter();
     private final LongCounter activeBytesHuge = PlatformDependent.newLongCounter();
-
     private long deallocationsSmall;
     private long deallocationsNormal;
-
-    // We need to use the LongCounter here as this is not guarded via synchronized
-    // block.
     private final LongCounter deallocationsHuge = PlatformDependent.newLongCounter();
 
-    // Number of thread caches backed by this arena.
+    /**
+     * 线程缓存计数器
+     * <p>
+     * 记录使用此Arena的线程缓存数量
+     * 用于负载均衡和资源管理
+     * </p>
+     */
     final AtomicInteger numThreadCaches = new AtomicInteger();
 
-    // TODO: Test if adding padding helps under contention
-    // private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
-
+    /**
+     * 内存访问同步锁
+     * <p>
+     * 保护Arena内共享数据的并发访问
+     * 用于同步内存分配和释放操作
+     * </p>
+     */
     private final ReentrantLock lock = new ReentrantLock();
 
+    /**
+     * 内存大小类别配置
+     * <p>
+     * 管理内存规格大小的映射关系
+     * 包含页大小、块大小、对齐要求等配置
+     * 是Netty内存池系统的核心配置类
+     * </p>
+     */
     final SizeClasses sizeClass;
 
     /**
@@ -271,6 +353,61 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         }
     }
 
+    /**
+     * 分配小内存块的核心方法。小内存指小于等于一个页大小（通常为8KB）的内存请求。
+     * <p>
+     * 此方法实现了Netty内存池的三级分配策略，优先级从高到低依次为：
+     * <ol>
+     *   <li>线程本地缓存（Thread Local Cache）分配 - 无锁，最快</li>
+     *   <li>共享子页（Shared Subpage）分配 - 轻量级锁，较快</li>
+     *   <li>新页分配（New Page Allocation）- 全局锁，较慢</li>
+     * </ol>
+     * </p>
+     * 
+     * <h3>分配流程详解：</h3>
+     * <ol>
+     *   <li><b>线程缓存尝试</b>：首先尝试从当前线程的本地缓存中分配，这是无锁操作，性能最佳</li>
+     *   <li><b>子页池分配</b>：如果线程缓存未命中，则尝试从共享子页池中分配
+     *     <ul>
+     *       <li>使用细粒度锁保护特定大小类别的子页链表</li>
+     *       <li>检查链表是否有可用子页</li>
+     *       <li>如有可用子页，从中分配内存切片并初始化ByteBuf</li>
+     *     </ul>
+     *   </li>
+     *   <li><b>正常分配</b>：如果子页池为空，则需要分配新的页面并进行子页划分
+     *     <ul>
+     *       <li>需要获取Arena全局锁</li>
+     *       <li>调用allocateNormal分配新的完整页面</li>
+     *       <li>将页面划分为多个子页并加入子页池</li>
+     *     </ul>
+     *   </li>
+     *   <li><b>统计更新</b>：完成分配后，更新小内存分配统计计数</li>
+     * </ol>
+     * 
+     * <h3>锁机制说明：</h3>
+     * <ul>
+     *   <li>使用细粒度锁设计，对每个大小类别的子页链表使用独立的锁</li>
+     *   <li>只有在需要分配新页面时才获取Arena全局锁</li>
+     *   <li>这种分层锁设计显著减少了线程竞争，提高了并发性能</li>
+     * </ul>
+     * 
+     * <h3>性能优化考虑：</h3>
+     * <ul>
+     *   <li>优先使用线程本地缓存避免同步开销</li>
+     *   <li>使用细粒度锁减少锁竞争</li>
+     *   <li>通过sizeIdx快速定位到特定大小的子页池</li>
+     *   <li>内存复用减少内存分配和GC压力</li>
+     * </ul>
+     * 
+     * @param cache 当前线程的缓存，用于快速分配和回收内存
+     * @param buf 待初始化的ByteBuf对象，分配的内存将绑定到此对象
+     * @param reqCapacity 请求的内存容量（字节数）
+     * @param sizeIdx 标准化后的大小类别索引，用于定位子页池和确定实际分配大小
+     * 
+     * @see PoolThreadCache#allocateSmall(PoolArena, PooledByteBuf, int, int)
+     * @see PoolSubpage
+     * @see #allocateNormal(PooledByteBuf, int, int, PoolThreadCache)
+     */
     private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf,
             final int reqCapacity, final int sizeIdx) {
 
@@ -360,6 +497,12 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         allocationsSmall.increment();
     }
 
+    /**
+     * 分配超大内存块的方法
+     * 
+     * @param buf         需要初始化的缓冲区
+     * @param reqCapacity 请求的内存容量
+     */
     private void allocateHuge(PooledByteBuf<T> buf, int reqCapacity) {
         PoolChunk<T> chunk = newUnpooledChunk(reqCapacity); // 步骤1: 创建非池化内存块
         activeBytesHuge.add(chunk.chunkSize()); // 步骤2: 更新内存使用统计
@@ -367,20 +510,77 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         allocationsHuge.increment(); // 步骤4: 更新分配计数器
     }
 
+    /**
+     * 释放内存块回池中或销毁非池化内存。此方法是Netty内存池系统中内存释放的核心入口。
+     * <p>
+     * 当ByteBuf不再使用时，此方法负责将其占用的内存返还给内存池或释放给系统。
+     * 方法会根据内存块的类型(池化或非池化)、大小类别和线程缓存配置采取不同的处理策略。
+     * </p>
+     * 
+     * <h3>重要变量说明：</h3>
+     * <ul>
+     * <li><b>chunk</b> - 要释放的内存块，包含实际的内存数据和元数据</li>
+     * <li><b>nioBuffer</b> - 与内存块关联的临时NIO ByteBuffer，用于I/O操作</li>
+     * <li><b>handle</b> - 内存块中的句柄值，用于定位要释放的具体内存部分</li>
+     * <li><b>normCapacity</b> - 标准化后的容量大小，与内存分配时使用的规格匹配</li>
+     * <li><b>cache</b> - 线程本地缓存，用于缓存释放的内存块以加速后续分配</li>
+     * </ul>
+     * 
+     * <h3>释放策略：</h3>
+     * <ol>
+     * <li><b>非池化内存(unpooled)</b>：直接销毁内存块，更新统计计数器</li>
+     * <li><b>池化内存</b>：
+     * <ul>
+     * <li>尝试将内存块添加到线程本地缓存(如果启用)</li>
+     * <li>如果缓存失败或未启用缓存，则释放回内存池</li>
+     * </ul>
+     * </li>
+     * </ol>
+     * 
+     * <h3>性能考虑：</h3>
+     * <ul>
+     * <li>对于频繁分配和释放的小内存块，使用线程本地缓存可显著提高性能</li>
+     * <li>大内存块直接释放，避免占用缓存空间</li>
+     * <li>方法内部处理了对统计计数器的更新，用于监控内存使用情况</li>
+     * </ul>
+     *
+     * @param chunk        要释放的内存块
+     * @param nioBuffer    与内存块关联的NIO ByteBuffer，可能为null
+     * @param handle       内存块中的句柄，用于定位具体的内存部分
+     * @param normCapacity 标准化的容量大小
+     * @param cache        线程本地缓存，若为null则不使用缓存
+     * 
+     * @see PoolChunk#unpooled
+     * @see PoolThreadCache#add(PoolArena, PoolChunk, ByteBuffer, long, int,
+     *      PoolArena.SizeClass)
+     * @see #freeChunk(PoolChunk, long, int, SizeClass, ByteBuffer, boolean)
+     */
     void free(PoolChunk<T> chunk, ByteBuffer nioBuffer, long handle, int normCapacity, PoolThreadCache cache) {
+        // 减少内存块的固定内存计数，表示此内存不再被引用
         chunk.decrementPinnedMemory(normCapacity);
+
+        // 判断是否为非池化内存块
         if (chunk.unpooled) {
+            // 获取内存块大小
             int size = chunk.chunkSize();
+            // 销毁非池化内存块
             destroyChunk(chunk);
+            // 更新活跃的大内存字节计数
             activeBytesHuge.add(-size);
+            // 增加大内存释放计数
             deallocationsHuge.increment();
         } else {
+            // 池化内存块的处理
+            // 确定内存大小类别(小内存或普通内存)
             SizeClass sizeClass = sizeClass(handle);
+
+            // 尝试将内存添加到线程本地缓存
             if (cache != null && cache.add(this, chunk, nioBuffer, handle, normCapacity, sizeClass)) {
-                // cached so not free it.
+                // 缓存成功，不需要进一步释放
                 return;
             }
 
+            // 缓存失败或未使用缓存，释放内存块回池中
             freeChunk(chunk, handle, normCapacity, sizeClass, nioBuffer, false);
         }
     }
@@ -419,57 +619,96 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         }
     }
 
+    /**
+     * 重新分配PooledByteBuf的内存。当缓冲区需要调整容量时，此方法会分配新的内存块，复制原有数据，并释放旧内存。
+     * <p>
+     * 此方法是Netty内存池系统中ByteBuf扩容和缩容的核心实现。它通过以下步骤完成内存重分配：
+     * <ol>
+     * <li>保存原缓冲区的状态和内存信息</li>
+     * <li>从内存池分配新的内存块</li>
+     * <li>复制原有数据到新内存</li>
+     * <li>释放原有内存回池中</li>
+     * </ol>
+     * </p>
+     * <p>
+     * 为确保多线程环境下的安全性，方法在操作过程中会对ByteBuf对象进行同步，防止内存状态被并发修改导致损坏。
+     * </p>
+     *
+     * <h3>重要变量说明：</h3>
+     * <ul>
+     * <li><b>oldCapacity</b> - 缓冲区原始容量，即旧内存块的有效字节数</li>
+     * <li><b>oldChunk</b> - 原始内存块，包含旧的内存分配</li>
+     * <li><b>oldNioBuffer</b> - 与旧内存块关联的临时NIO ByteBuffer，用于I/O操作</li>
+     * <li><b>oldHandle</b> - 在旧内存块中的句柄值，用于定位和释放内存</li>
+     * <li><b>oldMemory</b> - 旧的内存引用，可能是byte[]或ByteBuffer类型</li>
+     * <li><b>oldOffset</b> - 旧内存的起始偏移量，表示有效数据的开始位置</li>
+     * <li><b>oldMaxLength</b> - 旧内存块的最大可用长度，通常大于等于实际容量</li>
+     * <li><b>oldCache</b> - 原有的线程本地缓存，用于加速内存分配</li>
+     * <li><b>bytesToCopy</b> - 需要从旧内存复制到新内存的字节数，取决于新旧容量的大小关系</li>
+     * </ul>
+     *
+     * @param buf         需要重新分配内存的PooledByteBuf
+     * @param newCapacity 请求的新容量大小（字节数）
+     *
+     * @throws IllegalArgumentException 如果newCapacity为负数或超过buf的最大容量
+     * @throws OutOfMemoryError         如果内存分配失败
+     * 
+     * @see PooledByteBuf#capacity(int)
+     * @see #allocate(PoolThreadCache, PooledByteBuf, int)
+     * @see #free(PoolChunk, ByteBuffer, long, int, PoolThreadCache)
+     */
     void reallocate(PooledByteBuf<T> buf, int newCapacity) {
+        // 确保新容量在有效范围内
         assert newCapacity >= 0 && newCapacity <= buf.maxCapacity();
 
-        final int oldCapacity;
-        final PoolChunk<T> oldChunk;
-        final ByteBuffer oldNioBuffer;
-        final long oldHandle;
-        final T oldMemory;
-        final int oldOffset;
-        final int oldMaxLength;
-        final PoolThreadCache oldCache;
+        // 用于保存原有内存状态的变量
+        final int oldCapacity; // 原始容量
+        final PoolChunk<T> oldChunk; // 原始内存块
+        final ByteBuffer oldNioBuffer; // 原始NIO缓冲区
+        final long oldHandle; // 原始内存句柄
+        final T oldMemory; // 原始内存引用
+        final int oldOffset; // 原始内存偏移量
+        final int oldMaxLength; // 原始最大可用长度
+        final PoolThreadCache oldCache; // 原始线程缓存
 
-        // We synchronize on the ByteBuf itself to ensure there is no "concurrent"
-        // reallocations for the same buffer.
-        // We do this to ensure the ByteBuf internal fields that are used to allocate /
-        // free are not accessed
-        // concurrently. This is important as otherwise we might end up corrupting our
-        // internal state of our data
-        // structures.
-        //
-        // Also note we don't use a Lock here but just synchronized even tho this might
-        // seem like a bad choice for Loom.
-        // This is done to minimize the overhead per ByteBuf. The time this would block
-        // another thread should be
-        // relative small and so not be a problem for Loom.
-        // See https://github.com/netty/netty/issues/13467
+        // 对ByteBuf对象进行同步，确保在多线程环境下的内存操作安全
+        // 这里不使用Lock而是synchronized，是为了减少每个ByteBuf的开销
+        // 阻塞时间相对较短，不会对Loom造成问题
         synchronized (buf) {
-            oldCapacity = buf.length;
-            if (oldCapacity == newCapacity) {
+            oldCapacity = buf.length; // 获取当前容量
+            if (oldCapacity == newCapacity) { // 如果容量相同，无需重新分配
                 return;
             }
 
-            oldChunk = buf.chunk;
-            oldNioBuffer = buf.tmpNioBuf;
-            oldHandle = buf.handle;
-            oldMemory = buf.memory;
-            oldOffset = buf.offset;
-            oldMaxLength = buf.maxLength;
-            oldCache = buf.cache;
+            // 保存当前ByteBuf的所有相关状态
+            oldChunk = buf.chunk; // 当前内存块
+            oldNioBuffer = buf.tmpNioBuf; // 当前NIO缓冲区
+            oldHandle = buf.handle; // 当前内存句柄
+            oldMemory = buf.memory; // 当前内存引用
+            oldOffset = buf.offset; // 当前偏移量
+            oldMaxLength = buf.maxLength; // 当前最大长度
+            oldCache = buf.cache; // 当前线程缓存
 
-            // This does not touch buf's reader/writer indices
+            // 分配新的内存块，并更新ByteBuf的内部状态
+            // 这不会修改ByteBuf的读写索引
             allocate(parent.threadCache(), buf, newCapacity);
         }
+
+        // 确定需要复制的字节数
         int bytesToCopy;
         if (newCapacity > oldCapacity) {
+            // 扩容：只复制原有数据
             bytesToCopy = oldCapacity;
         } else {
+            // 缩容：调整读写索引，并只复制新容量大小的数据
             buf.trimIndicesToCapacity(newCapacity);
             bytesToCopy = newCapacity;
         }
+
+        // 将数据从旧内存复制到新内存
         memoryCopy(oldMemory, oldOffset, buf, bytesToCopy);
+
+        // 释放旧内存块回内存池
         free(oldChunk, oldNioBuffer, oldHandle, oldMaxLength, oldCache);
     }
 
@@ -679,6 +918,28 @@ abstract class PoolArena<T> implements PoolArenaMetric {
 
     protected abstract PoolChunk<T> newChunk(int pageSize, int maxPageIdx, int pageShifts, int chunkSize);
 
+    /**
+     * 创建非池化的内存块。这是一个抽象方法，由具体的Arena实现类提供实现。
+     * 
+     * @param capacity 请求的内存容量（以字节为单位）
+     * @return 新创建的PoolChunk对象
+     * 
+     * @implNote 该方法在DirectArena和HeapArena中有不同的实现：
+     *           - DirectArena:
+     *           使用ByteBuffer.allocateDirect或PlatformDependent.allocateDirectNoCleaner
+     *           - HeapArena: 使用byte[]数组
+     * 
+     * @implSpec 实现必须确保：
+     *           - 分配的内存大小不小于请求的capacity
+     *           - 返回的PoolChunk对象必须正确初始化
+     *           - 内存分配方式必须符合Arena的类型（堆内存或直接内存）
+     * 
+     * @see DirectArena#newUnpooledChunk(int)
+     * @see HeapArena#newUnpooledChunk(int)
+     * 
+     * @throws OutOfMemoryError         当系统无法分配请求的内存时抛出
+     * @throws IllegalArgumentException 当capacity小于等于0时抛出
+     */
     protected abstract PoolChunk<T> newUnpooledChunk(int capacity);
 
     protected abstract PooledByteBuf<T> newByteBuf(int maxCapacity);
@@ -857,20 +1118,76 @@ abstract class PoolArena<T> implements PoolArenaMetric {
                     pageShifts, chunkSize, maxPageIdx);
         }
 
+        /**
+         * 创建非池化的直接内存块。该方法用于分配超大内存块时，直接创建新的内存块而不使用内存池。
+         * 
+         * @param capacity 请求的内存容量（以字节为单位）
+         * @return 新创建的PoolChunk对象，包含分配的直接内存
+         * 
+         * @implNote 该方法根据directMemoryCacheAlignment的值采用不同的内存分配策略：
+         *           - 当directMemoryCacheAlignment为0时，直接分配所需大小的内存
+         *           - 当directMemoryCacheAlignment大于0时，会分配额外的内存空间以确保内存对齐
+         * 
+         * @implSpec 实现必须确保：
+         *           - 分配的内存大小不小于请求的capacity
+         *           - 当需要内存对齐时，实际分配的内存可能大于请求的capacity
+         *           - 返回的PoolChunk对象必须正确初始化，包含基础内存引用和实际使用内存引用
+         * 
+         * @see PoolChunk
+         * @see PlatformDependent#alignDirectBuffer(ByteBuffer, int)
+         * 
+         * @throws OutOfMemoryError         当系统无法分配请求的内存时抛出
+         * @throws IllegalArgumentException 当capacity小于等于0时抛出
+         */
         @Override
         protected PoolChunk<ByteBuffer> newUnpooledChunk(int capacity) {
+            // 检查是否需要内存对齐
             if (sizeClass.directMemoryCacheAlignment == 0) {
+                // 直接分配内存，无需对齐
                 ByteBuffer memory = allocateDirect(capacity);
+                // 创建PoolChunk，使用相同的内存引用作为基础内存和实际内存
                 return new PoolChunk<ByteBuffer>(this, memory, memory, capacity);
             }
 
+            // 需要内存对齐的情况
+            // 分配额外的内存空间用于对齐
             final ByteBuffer base = allocateDirect(capacity + sizeClass.directMemoryCacheAlignment);
+            // 进行内存对齐操作
             final ByteBuffer memory = PlatformDependent.alignDirectBuffer(base, sizeClass.directMemoryCacheAlignment);
+            // 创建PoolChunk，分别使用原始内存引用和对齐后的内存引用
             return new PoolChunk<ByteBuffer>(this, base, memory, capacity);
         }
 
+        /**
+         * 分配直接内存缓冲区。该方法根据系统配置选择不同的直接内存分配策略。
+         * 
+         * @param capacity 要分配的内存容量（以字节为单位）
+         * @return 新分配的ByteBuffer对象
+         * 
+         * @implNote 该方法提供了两种直接内存分配策略：
+         *           -
+         *           使用无清理器的直接内存分配（当PlatformDependent.useDirectBufferNoCleaner()返回true时）
+         *           -
+         *           使用标准JDK直接内存分配（当PlatformDependent.useDirectBufferNoCleaner()返回false时）
+         * 
+         * @implSpec 实现必须确保：
+         *           - 分配的内存大小必须等于请求的capacity
+         *           - 返回的ByteBuffer必须是直接缓冲区（isDirect()返回true）
+         *           - 当使用无清理器分配时，必须正确处理内存释放
+         * 
+         * @see PlatformDependent#useDirectBufferNoCleaner()
+         * @see PlatformDependent#allocateDirectNoCleaner(int)
+         * @see ByteBuffer#allocateDirect(int)
+         * 
+         * @throws OutOfMemoryError         当系统无法分配请求的内存时抛出
+         * @throws IllegalArgumentException 当capacity小于等于0时抛出
+         * 
+         * @apiNote 该方法主要用于Netty的内存池实现中，用于分配直接内存。
+         *          使用无清理器的分配方式可以提高性能，但需要手动管理内存释放。
+         */
         private static ByteBuffer allocateDirect(int capacity) {
-            return PlatformDependent.useDirectBufferNoCleaner() ? PlatformDependent.allocateDirectNoCleaner(capacity)
+            return PlatformDependent.useDirectBufferNoCleaner()
+                    ? PlatformDependent.allocateDirectNoCleaner(capacity)
                     : ByteBuffer.allocateDirect(capacity);
         }
 
@@ -883,6 +1200,47 @@ abstract class PoolArena<T> implements PoolArenaMetric {
             }
         }
 
+        /**
+         * 创建一个适合当前平台特性的池化直接内存缓冲区。
+         * <p>
+         * 本方法是Netty内存池中重要的工厂方法，根据平台是否支持Unsafe操作，
+         * 选择创建性能最优的ByteBuf实现。当平台支持Unsafe操作时，会创建
+         * {@link PooledUnsafeDirectByteBuf}，否则创建{@link PooledDirectByteBuf}。
+         * </p>
+         * 
+         * <h3>实现策略：</h3>
+         * <p>
+         * 采用基于平台能力的自适应策略：
+         * <ul>
+         * <li>当平台支持Unsafe操作时（通过{@code HAS_UNSAFE}判断），创建{@link PooledUnsafeDirectByteBuf}，
+         * 可直接通过内存地址进行操作，性能最优</li>
+         * <li>当平台不支持Unsafe操作时，创建{@link PooledDirectByteBuf}，通过JDK的ByteBuffer API操作内存，
+         * 性能次优但兼容性更好</li>
+         * </ul>
+         * </p>
+         * 
+         * <h3>性能考虑：</h3>
+         * <p>
+         * <ul>
+         * <li>{@link PooledUnsafeDirectByteBuf} 提供了最高性能，直接通过内存地址访问，绕过JDK的安全检查</li>
+         * <li>{@link PooledDirectByteBuf} 性能略低，但在不支持Unsafe的平台上是唯一选择</li>
+         * <li>两种实现都使用对象池技术减少GC压力，提高内存分配效率</li>
+         * </ul>
+         * </p>
+         * 
+         * <h3>内存管理：</h3>
+         * <p>
+         * 返回的ByteBuf实例由内存池管理，使用完毕后应当调用{@link ByteBuf#release()}方法释放，
+         * 而不是依赖垃圾回收。这确保了内存能够被及时回收到池中重用。
+         * </p>
+         * 
+         * @param maxCapacity 创建的ByteBuf的最大容量，单位为字节
+         * @return 根据平台特性创建的池化直接内存缓冲区
+         * 
+         * @see PooledUnsafeDirectByteBuf
+         * @see PooledDirectByteBuf
+         * @see PlatformDependent#hasUnsafe()
+         */
         @Override
         protected PooledByteBuf<ByteBuffer> newByteBuf(int maxCapacity) {
             if (HAS_UNSAFE) {

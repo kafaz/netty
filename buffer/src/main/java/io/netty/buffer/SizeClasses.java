@@ -18,67 +18,135 @@ package io.netty.buffer;
 import static io.netty.buffer.PoolThreadCache.*;
 
 /**
- * SizeClasses requires {@code pageShifts} to be defined prior to inclusion,
- * and it in turn defines:
+ * Netty内存池系统的内存大小规格化核心组件。
  * <p>
- * LOG2_SIZE_CLASS_GROUP: Log of size class count for each size doubling.
- * LOG2_MAX_LOOKUP_SIZE: Log of max size class in the lookup table.
- * sizeClasses: Complete table of [index, log2Group, log2Delta, nDelta,
- * isMultiPageSize,
- * isSubPage, log2DeltaLookup] tuples.
- * index: Size class index.
- * log2Group: Log of group base size (no deltas added).
- * log2Delta: Log of delta to previous size class.
- * nDelta: Delta multiplier.
- * isMultiPageSize: 'yes' if a multiple of the page size, 'no' otherwise.
- * isSubPage: 'yes' if a subpage size class, 'no' otherwise.
- * log2DeltaLookup: Same as log2Delta if a lookup table size class, 'no'
- * otherwise.
+ * SizeClasses负责将任意内存请求大小映射到预定义的标准内存规格，是Netty内存池高效管理的基础。
+ * 该类实现了基于jemalloc内存分配器设计理念的内存规格化算法，通过精心设计的映射表和计算方法，
+ * 在内存利用效率和分配速度之间取得平衡。
+ * </p>
+ * 
+ * <h2>核心概念</h2>
  * <p>
- * nSubpages: Number of subpages size classes.
- * nSizes: Number of size classes.
- * nPSizes: Number of size classes that are multiples of pageSize.
- *
- * smallMaxSizeIdx: Maximum small size class index.
- *
- * lookupMaxClass: Maximum size class included in lookup table.
- * log2NormalMinClass: Log of minimum normal size class.
+ * SizeClasses定义了以下关键概念：
+ * <ul>
+ * <li><b>大小类别</b>：将所有可能的内存请求大小划分为有限的标准大小</li>
+ * <li><b>sizeIdx</b>：每个标准大小对应的索引值，用于快速查找和分类</li>
+ * <li><b>子页</b>：小于一个页大小的内存块，通过特殊的子页机制管理</li>
+ * <li><b>规格表</b>：记录所有标准大小的完整映射表，包含各种元数据</li>
+ * </ul>
+ * </p>
+ * 
+ * <h2>内存规格计算原理</h2>
  * <p>
- * The first size class and spacing are 1 << LOG2_QUANTUM.
- * Each group has 1 << LOG2_SIZE_CLASS_GROUP of size classes.
- *
+ * SizeClasses使用以下公式计算标准内存大小：
+ * 
+ * <pre>
  * size = 1 << log2Group + nDelta * (1 << log2Delta)
- *
- * The first size class has an unusual encoding, because the size has to be
- * split between group and delta*nDelta.
- *
- * If pageShift = 13, sizeClasses looks like this:
- *
- * (index, log2Group, log2Delta, nDelta, isMultiPageSize, isSubPage,
- * log2DeltaLookup)
+ * </pre>
+ * 
+ * 其中：
+ * <ul>
+ * <li><b>log2Group</b>：基础大小组的对数值，决定了该组的基础大小</li>
+ * <li><b>log2Delta</b>：增量步长的对数值，决定了同组内不同大小的步进</li>
+ * <li><b>nDelta</b>：增量倍数，决定了在基础大小上增加多少个增量</li>
+ * </ul>
+ * 
+ * 这种设计具有以下特点：
+ * <ul>
+ * <li>小规格内存使用较小的增量步长，减少内存浪费</li>
+ * <li>大规格内存使用较大的增量步长，简化管理复杂度</li>
+ * <li>整体呈现近似指数增长，适合各种大小的内存请求</li>
+ * </ul>
+ * </p>
+ * 
+ * <h2>主要属性说明</h2>
  * <p>
- * ( 0, 4, 4, 0, no, yes, 4)
- * ( 1, 4, 4, 1, no, yes, 4)
- * ( 2, 4, 4, 2, no, yes, 4)
- * ( 3, 4, 4, 3, no, yes, 4)
+ * <ul>
+ * <li><b>LOG2_SIZE_CLASS_GROUP</b>：每个大小翻倍的大小类别数量的对数值</li>
+ * <li><b>LOG2_MAX_LOOKUP_SIZE</b>：查找表中最大大小类别的对数值</li>
+ * <li><b>nSubpages</b>：子页大小类别的数量，用于管理小内存</li>
+ * <li><b>nSizes</b>：总的大小类别数量</li>
+ * <li><b>nPSizes</b>：页大小整数倍的大小类别数量</li>
+ * <li><b>smallMaxSizeIdx</b>：最大的小内存大小类别索引</li>
+ * <li><b>lookupMaxClass</b>：查找表包含的最大大小类别</li>
+ * <li><b>log2NormalMinClass</b>：最小普通大小类别的对数值</li>
+ * </ul>
+ * </p>
+ * 
+ * <h2>规格表结构</h2>
  * <p>
- * ( 4, 6, 4, 1, no, yes, 4)
- * ( 5, 6, 4, 2, no, yes, 4)
- * ( 6, 6, 4, 3, no, yes, 4)
- * ( 7, 6, 4, 4, no, yes, 4)
+ * 规格表是一个多维数组，每行包含以下元素：
+ * <ol>
+ * <li><b>index</b>：大小类别索引，即sizeIdx</li>
+ * <li><b>log2Group</b>：组基础大小的对数值</li>
+ * <li><b>log2Delta</b>：增量步长的对数值</li>
+ * <li><b>nDelta</b>：增量倍数</li>
+ * <li><b>isMultiPageSize</b>：是否为页大小的整数倍</li>
+ * <li><b>isSubPage</b>：是否为子页大小</li>
+ * <li><b>log2DeltaLookup</b>：查找表大小类别的log2Delta值</li>
+ * </ol>
+ * </p>
+ * 
+ * <h2>内存分类</h2>
  * <p>
- * ( 8, 7, 5, 1, no, yes, 5)
- * ( 9, 7, 5, 2, no, yes, 5)
- * ( 10, 7, 5, 3, no, yes, 5)
- * ( 11, 7, 5, 4, no, yes, 5)
+ * SizeClasses将内存分为三类：
+ * <ul>
+ * <li><b>小内存</b>：小于等于smallMaxSizeIdx对应的大小，通常在8B-4KB之间</li>
+ * <li><b>普通内存</b>：大于小内存且小于一个chunk大小(通常是16MB)</li>
+ * <li><b>大内存</b>：大于chunk大小的内存请求</li>
+ * </ul>
+ * </p>
+ * 
+ * <h2>主要计算流程</h2>
+ * <p>
+ * 1. <b>size2SizeIdx</b>：将请求大小转换为大小类别索引
+ * <ul>
+ * <li>对于小内存：查表快速定位</li>
+ * <li>对于普通内存：通过计算定位</li>
+ * <li>对于大内存：返回特殊标记</li>
+ * </ul>
+ * </p>
+ * <p>
+ * 2. <b>sizeIdx2size</b>：将大小类别索引转换为实际内存大小
+ * <ul>
+ * <li>通过规格表直接查询各项参数</li>
+ * <li>使用公式：size = 1 << log2Group + nDelta * (1 << log2Delta)计算实际大小</li>
+ * </ul>
+ * </p>
+ * <p>
+ * 3. <b>normalizeSize</b>：将任意大小规范化为标准大小
+ * <ul>
+ * <li>首先调用size2SizeIdx获取大小类别索引</li>
+ * <li>然后调用sizeIdx2size获取标准化大小</li>
+ * </ul>
+ * </p>
+ * 
+ * <p>
+ * 示例规格表(pageShift = 13时的部分规格):
+ * 
+ * <pre>
+ * (index, log2Group, log2Delta, nDelta, isMultiPageSize, isSubPage, log2DeltaLookup)
+ * 
+ * ( 0, 4, 4, 0, no, yes, 4)  // 16B
+ * ( 1, 4, 4, 1, no, yes, 4)  // 32B
+ * ( 2, 4, 4, 2, no, yes, 4)  // 48B
+ * ( 3, 4, 4, 3, no, yes, 4)  // 64B
+ * 
+ * ( 4, 6, 4, 1, no, yes, 4)  // 80B
  * ...
- * ...
- * ( 72, 23, 21, 1, yes, no, no)
- * ( 73, 23, 21, 2, yes, no, no)
- * ( 74, 23, 21, 3, yes, no, no)
- * ( 75, 23, 21, 4, yes, no, no)
+ * 
+ * ( 76, 24, 22, 1, yes, no, no)  // 大内存
+ * </pre>
+ * </p>
+ * 
  * <p>
- * ( 76, 24, 22, 1, yes, no, no)
+ * 通过这种精心设计的规格系统，Netty能够高效地管理各种大小的内存请求，
+ * 在内存利用率和分配速度之间取得良好的平衡。
+ * </p>
+ * 
+ * @see PoolArena
+ * @see PoolChunk
+ * @see PoolSubpage
  */
 final class SizeClasses implements SizeClassesMetric {
 

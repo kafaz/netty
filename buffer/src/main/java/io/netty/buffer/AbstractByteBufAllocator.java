@@ -34,19 +34,20 @@ import io.netty.util.internal.StringUtil;
  * <p>
  * 该类提供以下主要功能：
  * <ul>
- *   <li>提供统一的缓冲区创建API，包括堆内存缓冲区、直接内存缓冲区和复合缓冲区</li>
- *   <li>处理容量验证、默认值和最大值计算</li>
- *   <li>支持内存泄漏检测（通过包装返回的缓冲区）</li>
- *   <li>提供缓冲区扩容算法</li>
+ * <li>提供统一的缓冲区创建API，包括堆内存缓冲区、直接内存缓冲区和复合缓冲区</li>
+ * <li>处理容量验证、默认值和最大值计算</li>
+ * <li>支持内存泄漏检测（通过包装返回的缓冲区）</li>
+ * <li>提供缓冲区扩容算法</li>
  * </ul>
  * <p>
  * 继承此类的实现通常有两种类型：
  * <ul>
- *   <li>池化分配器 - 如{@code PooledByteBufAllocator}，实现缓冲区对象和底层内存的重用</li>
- *   <li>非池化分配器 - 如{@code UnpooledByteBufAllocator}，每次请求都分配新的内存</li>
+ * <li>池化分配器 - 如{@code PooledByteBufAllocator}，实现缓冲区对象和底层内存的重用</li>
+ * <li>非池化分配器 - 如{@code UnpooledByteBufAllocator}，每次请求都分配新的内存</li>
  * </ul>
  * <p>
  * 使用示例：
+ * 
  * <pre>
  * 创建一个堆内存缓冲区
  * ByteBuf heapBuf = alloc.heapBuffer(1024);
@@ -133,7 +134,8 @@ public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
     /**
      * Create new instance
      *
-     * @param preferDirect {@code true} if {@link #buffer(int)} should try to allocate a direct buffer rather than
+     * @param preferDirect {@code true} if {@link #buffer(int)} should try to
+     *                     allocate a direct buffer rather than
      *                     a heap buffer
      */
     protected AbstractByteBufAllocator(boolean preferDirect) {
@@ -278,7 +280,8 @@ public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
     protected abstract ByteBuf newHeapBuffer(int initialCapacity, int maxCapacity);
 
     /**
-     * Create a direct {@link ByteBuf} with the given initialCapacity and maxCapacity.
+     * Create a direct {@link ByteBuf} with the given initialCapacity and
+     * maxCapacity.
      */
     protected abstract ByteBuf newDirectBuffer(int initialCapacity, int maxCapacity);
 
@@ -287,32 +290,69 @@ public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
         return StringUtil.simpleClassName(this) + "(directByDefault: " + directByDefault + ')';
     }
 
+    /**
+     * 计算ByteBuf扩容时的新容量值。当ByteBuf需要扩容以容纳更多数据时，此方法根据特定算法确定合适的新容量。
+     * <p>
+     * 扩容策略遵循以下规则：
+     * <ul>
+     * <li>如果请求的最小新容量等于阈值(4 MiB)，则直接返回该值</li>
+     * <li>如果请求的最小新容量大于阈值(4 MiB)，则按阈值对齐，即新容量为阈值的整数倍</li>
+     * <li>如果请求的最小新容量小于阈值(4 MiB)，则返回大于等于最小新容量的最小2的幂次方值，且不小于64</li>
+     * </ul>
+     * </p>
+     * <p>
+     * 此算法设计目的是在小容量场景下快速扩容（使用2的幂次方），而在大容量场景下控制内存增长（使用固定增量）。
+     * </p>
+     *
+     * @param minNewCapacity 要求的最小新容量
+     * @param maxCapacity    允许的最大容量
+     * @return 计算出的新容量，该值总是大于等于minNewCapacity且小于等于maxCapacity
+     *
+     * @throws IllegalArgumentException 如果minNewCapacity为负数或大于maxCapacity
+     *
+     * @see ByteBuf#capacity(int)
+     * @see ByteBuf#ensureWritable(int)
+     */
     @Override
     public int calculateNewCapacity(int minNewCapacity, int maxCapacity) {
+        // 检查minNewCapacity是否为非负数
         checkPositiveOrZero(minNewCapacity, "minNewCapacity");
+
+        // 检查minNewCapacity是否超过了maxCapacity
         if (minNewCapacity > maxCapacity) {
             throw new IllegalArgumentException(String.format(
                     "minNewCapacity: %d (expected: not greater than maxCapacity(%d)",
                     minNewCapacity, maxCapacity));
         }
+
+        // 定义阈值常量，4 MiB，用于区分不同的扩容策略
         final int threshold = CALCULATE_THRESHOLD; // 4 MiB page
 
+        // 如果请求的容量恰好等于阈值，直接返回阈值
         if (minNewCapacity == threshold) {
             return threshold;
         }
 
-        // If over threshold, do not double but just increase by threshold.
+        // 如果请求的容量大于阈值，采用阈值对齐的方式扩容
         if (minNewCapacity > threshold) {
+            // 计算阈值的整数倍，向下取整
             int newCapacity = minNewCapacity / threshold * threshold;
+
+            // 如果新容量超过了maxCapacity减去一个阈值的值，直接返回maxCapacity
+            // 否则，增加一个阈值的大小，确保新容量足够大
             if (newCapacity > maxCapacity - threshold) {
                 newCapacity = maxCapacity;
             } else {
                 newCapacity += threshold;
             }
+
             return newCapacity;
         }
 
-        // 64 <= newCapacity is a power of 2 <= threshold
+        // 处理小容量情况：
+        // 1. 确保最小容量至少为64
+        // 2. 找到大于等于minNewCapacity的最小2的幂次方值
+        // 3. 确保不超过maxCapacity
         final int newCapacity = MathUtil.findNextPositivePowerOfTwo(Math.max(minNewCapacity, 64));
         return Math.min(newCapacity, maxCapacity);
     }

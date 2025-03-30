@@ -36,8 +36,11 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Netty中的池化ByteBuf分配器实现类
- * 该类负责管理和分配池化的ByteBuf,通过精细的内存管理提升性能和减少内存碎片
+ * Netty的池化ByteBuf分配器实现，通过内存池管理机制提高内存分配效率，减少GC压力。
+ * <p>
+ * PooledByteBufAllocator是Netty默认的内存分配器，实现了高效的内存池管理，
+ * 包含堆内存和直接内存两种类型的内存池，以及支持多级缓存的线程本地缓存机制。
+ * </p>
  */
 public class PooledByteBufAllocator extends AbstractByteBufAllocator implements ByteBufAllocatorMetricProvider {
 
@@ -205,19 +208,114 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         }
     }
 
+    /**
+     * 默认的PooledByteBufAllocator实例。
+     * <p>
+     * 根据平台偏好决定是否优先使用直接内存。在大多数现代操作系统上，
+     * 默认会优先使用直接内存以提高网络IO性能。此实例在Netty应用中被
+     * 广泛使用，作为默认的内存分配策略。
+     * </p>
+     */
     public static final PooledByteBufAllocator DEFAULT = new PooledByteBufAllocator(
             PlatformDependent.directBufferPreferred());
 
+    /**
+     * 堆内存区域(Arena)数组。
+     * <p>
+     * 每个PoolArena管理一组内存块(chunk)的分配和回收。
+     * 使用多个Arena可以减少线程竞争，提高并发性能。
+     * 每个线程会被分配到一个特定的Arena，通常基于线程ID的哈希值。
+     * </p>
+     */
     private final PoolArena<byte[]>[] heapArenas;
+
+    /**
+     * 直接内存区域(Arena)数组。
+     * <p>
+     * 管理直接内存(堆外内存)的分配和回收。
+     * 直接内存适合用于网络IO操作，可以避免内存复制，
+     * 但分配和释放的开销较大，因此使用内存池进行管理。
+     * </p>
+     */
     private final PoolArena<ByteBuffer>[] directArenas;
+
+    /**
+     * 小型缓存的容量大小。
+     * <p>
+     * 线程本地缓存中用于缓存小内存块(通常小于8KB)的队列容量。
+     * 较大的缓存大小可以提高内存复用效率，减少锁竞争，
+     * 但会增加内存占用。此值可在构造函数中配置。
+     * </p>
+     */
     private final int smallCacheSize;
+
+    /**
+     * 标准缓存的容量大小。
+     * <p>
+     * 线程本地缓存中用于缓存普通大小内存块(通常8KB-16MB)的队列容量。
+     * 控制每个线程可以缓存的普通大小内存块数量，
+     * 影响内存分配性能和内存占用平衡。
+     * </p>
+     */
     private final int normalCacheSize;
+
+    /**
+     * 堆内存区域指标列表。
+     * <p>
+     * 提供只读的堆内存区域统计信息，用于监控和调试。
+     * 包含内存分配、释放、使用率等指标，
+     * 可通过JMX或日志系统访问这些指标。
+     * </p>
+     */
     private final List<PoolArenaMetric> heapArenaMetrics;
+
+    /**
+     * 直接内存区域指标列表。
+     * <p>
+     * 提供只读的直接内存区域统计信息，用于监控和调试。
+     * 包含内存分配、释放、使用率等指标，
+     * 对于检测直接内存泄漏特别重要。
+     * </p>
+     */
     private final List<PoolArenaMetric> directArenaMetrics;
+
+    /**
+     * 线程本地缓存管理器。
+     * <p>
+     * 为每个线程维护一个本地内存缓存，避免多线程竞争。
+     * 通过ThreadLocal实现，每个线程首次访问时创建专属缓存。
+     * 这是Netty内存池高性能的关键组件，显著减少了锁竞争。
+     * </p>
+     */
     private final PoolThreadLocalCache threadCache;
+
+    /**
+     * 内存块(chunk)的大小，单位为字节。
+     * <p>
+     * 内存池中最大的分配单位，默认为16MB。
+     * 所有小于此大小的内存请求都会在chunk内部分配，
+     * 而超过此大小的请求会被视为"huge"，直接分配独立内存。
+     * 此值影响内存利用率和碎片化程度。
+     * </p>
+     */
     private final int chunkSize;
+
+    /**
+     * 分配器指标收集器。
+     * <p>
+     * 提供整个分配器的统计信息和指标数据。
+     * 包含已分配内存总量、活跃分配数、使用率等信息，
+     * 用于监控系统内存使用情况和性能分析。
+     * </p>
+     */
     private final PooledByteBufAllocatorMetric metric;
 
+    /**
+     * 创建默认配置的PooledByteBufAllocator实例。
+     * <p>
+     * 使用系统默认设置，不优先使用直接内存。
+     * </p>
+     */
     public PooledByteBufAllocator() {
         this(false);
     }
