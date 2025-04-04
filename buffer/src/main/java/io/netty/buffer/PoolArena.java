@@ -358,51 +358,51 @@ abstract class PoolArena<T> implements PoolArenaMetric {
      * <p>
      * 此方法实现了Netty内存池的三级分配策略，优先级从高到低依次为：
      * <ol>
-     *   <li>线程本地缓存（Thread Local Cache）分配 - 无锁，最快</li>
-     *   <li>共享子页（Shared Subpage）分配 - 轻量级锁，较快</li>
-     *   <li>新页分配（New Page Allocation）- 全局锁，较慢</li>
+     * <li>线程本地缓存（Thread Local Cache）分配 - 无锁，最快</li>
+     * <li>共享子页（Shared Subpage）分配 - 轻量级锁，较快</li>
+     * <li>新页分配（New Page Allocation）- 全局锁，较慢</li>
      * </ol>
      * </p>
      * 
      * <h3>分配流程详解：</h3>
      * <ol>
-     *   <li><b>线程缓存尝试</b>：首先尝试从当前线程的本地缓存中分配，这是无锁操作，性能最佳</li>
-     *   <li><b>子页池分配</b>：如果线程缓存未命中，则尝试从共享子页池中分配
-     *     <ul>
-     *       <li>使用细粒度锁保护特定大小类别的子页链表</li>
-     *       <li>检查链表是否有可用子页</li>
-     *       <li>如有可用子页，从中分配内存切片并初始化ByteBuf</li>
-     *     </ul>
-     *   </li>
-     *   <li><b>正常分配</b>：如果子页池为空，则需要分配新的页面并进行子页划分
-     *     <ul>
-     *       <li>需要获取Arena全局锁</li>
-     *       <li>调用allocateNormal分配新的完整页面</li>
-     *       <li>将页面划分为多个子页并加入子页池</li>
-     *     </ul>
-     *   </li>
-     *   <li><b>统计更新</b>：完成分配后，更新小内存分配统计计数</li>
+     * <li><b>线程缓存尝试</b>：首先尝试从当前线程的本地缓存中分配，这是无锁操作，性能最佳</li>
+     * <li><b>子页池分配</b>：如果线程缓存未命中，则尝试从共享子页池中分配
+     * <ul>
+     * <li>使用细粒度锁保护特定大小类别的子页链表</li>
+     * <li>检查链表是否有可用子页</li>
+     * <li>如有可用子页，从中分配内存切片并初始化ByteBuf</li>
+     * </ul>
+     * </li>
+     * <li><b>正常分配</b>：如果子页池为空，则需要分配新的页面并进行子页划分
+     * <ul>
+     * <li>需要获取Arena全局锁</li>
+     * <li>调用allocateNormal分配新的完整页面</li>
+     * <li>将页面划分为多个子页并加入子页池</li>
+     * </ul>
+     * </li>
+     * <li><b>统计更新</b>：完成分配后，更新小内存分配统计计数</li>
      * </ol>
      * 
      * <h3>锁机制说明：</h3>
      * <ul>
-     *   <li>使用细粒度锁设计，对每个大小类别的子页链表使用独立的锁</li>
-     *   <li>只有在需要分配新页面时才获取Arena全局锁</li>
-     *   <li>这种分层锁设计显著减少了线程竞争，提高了并发性能</li>
+     * <li>使用细粒度锁设计，对每个大小类别的子页链表使用独立的锁</li>
+     * <li>只有在需要分配新页面时才获取Arena全局锁</li>
+     * <li>这种分层锁设计显著减少了线程竞争，提高了并发性能</li>
      * </ul>
      * 
      * <h3>性能优化考虑：</h3>
      * <ul>
-     *   <li>优先使用线程本地缓存避免同步开销</li>
-     *   <li>使用细粒度锁减少锁竞争</li>
-     *   <li>通过sizeIdx快速定位到特定大小的子页池</li>
-     *   <li>内存复用减少内存分配和GC压力</li>
+     * <li>优先使用线程本地缓存避免同步开销</li>
+     * <li>使用细粒度锁减少锁竞争</li>
+     * <li>通过sizeIdx快速定位到特定大小的子页池</li>
+     * <li>内存复用减少内存分配和GC压力</li>
      * </ul>
      * 
-     * @param cache 当前线程的缓存，用于快速分配和回收内存
-     * @param buf 待初始化的ByteBuf对象，分配的内存将绑定到此对象
+     * @param cache       当前线程的缓存，用于快速分配和回收内存
+     * @param buf         待初始化的ByteBuf对象，分配的内存将绑定到此对象
      * @param reqCapacity 请求的内存容量（字节数）
-     * @param sizeIdx 标准化后的大小类别索引，用于定位子页池和确定实际分配大小
+     * @param sizeIdx     标准化后的大小类别索引，用于定位子页池和确定实际分配大小
      * 
      * @see PoolThreadCache#allocateSmall(PoolArena, PooledByteBuf, int, int)
      * @see PoolSubpage
@@ -411,53 +411,72 @@ abstract class PoolArena<T> implements PoolArenaMetric {
     private void tcacheAllocateSmall(PoolThreadCache cache, PooledByteBuf<T> buf,
             final int reqCapacity, final int sizeIdx) {
 
-        // 1. 首先尝试从线程缓存中分配
+        // 第一阶段：线程本地缓存分配
+        // 尝试从线程本地缓存中分配内存，这是最快的路径，无需任何同步
+        // cache.allocateSmall会返回true表示成功，此时buf已被初始化
         if (cache.allocateSmall(this, buf, reqCapacity, sizeIdx)) {
-            return; // 如果从缓存分配成功，直接返回
+            return; // 缓存分配成功，直接返回，避免后续更昂贵的分配过程
         }
 
-        // 2. 获取对应大小的 Subpage 池头节点
+        // 第二阶段：共享子页池分配
+        // 获取对应大小类别的子页池头节点，smallSubpagePools是按不同大小索引组织的子页池数组
         final PoolSubpage<T> head = smallSubpagePools[sizeIdx];
+        // 声明变量标记是否需要进行更昂贵的正常分配
         final boolean needsNormalAllocation;
 
-        // 3. 加锁保护 Subpage 池的访问
+        // 对子页池头节点加锁，这是一个细粒度锁，只锁定特定大小类别的子页池
+        // 减少锁竞争，提高并发性能
         head.lock();
         try {
-            // 4. 获取下一个可用的 Subpage
+            // 获取链表中第一个可用子页（如果有）
             final PoolSubpage<T> s = head.next;
-            needsNormalAllocation = s == head; // 判断是否需要正常分配
+            // 检查链表是否为空（当next指向head自身时表示链表为空）
+            needsNormalAllocation = s == head;
 
-            // 5. 如果 Subpage 池不为空
+            // 如果子页池不为空，尝试从现有子页分配
             if (!needsNormalAllocation) {
-                // 验证 Subpage 状态
+                // 断言验证子页状态正确：
+                // 1. 子页标记为不可销毁(正在使用中)
+                // 2. 子页的元素大小与当前请求的大小类别匹配
                 assert s.doNotDestroy && s.elemSize == sizeClass.sizeIdx2size(sizeIdx)
                         : "doNotDestroy=" + s.doNotDestroy +
                                 ", elemSize=" + s.elemSize +
                                 ", sizeIdx=" + sizeIdx;
 
-                // 6. 分配内存
+                // 从子页中分配内存，返回内存句柄
+                // 内存句柄是一个64位长整型，编码了内存位置信息
                 long handle = s.allocate();
+                // 确保分配成功（handle >= 0）
                 assert handle >= 0;
 
-                // 7. 初始化 ByteBuf
+                // 使用分配的内存句柄初始化ByteBuf对象
+                // 此方法设置buf的内存引用、基址、容量等属性
                 s.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
             }
         } finally {
-            head.unlock(); // 释放锁
+            // 确保无论成功失败都释放子页池的锁
+            head.unlock();
         }
 
-        // 8. 如果需要正常分配
+        // 第三阶段：正常分配（如需要）
+        // 如果子页池为空，需要创建新的子页
         if (needsNormalAllocation) {
-            lock(); // 加锁保护 Arena
+            // 获取Arena全局锁，这是一个更重的锁，但使用频率较低
+            lock();
             try {
-                // 9. 执行正常分配
+                // 执行正常分配逻辑：
+                // 1. 分配一个新的页或页集合
+                // 2. 创建新的子页并加入子页池
+                // 3. 从新创建的子页中分配内存
                 allocateNormal(buf, reqCapacity, sizeIdx, cache);
             } finally {
-                unlock(); // 释放锁
+                // 确保释放Arena全局锁
+                unlock();
             }
         }
 
-        // 10. 增加小内存分配计数
+        // 第四阶段：统计更新
+        // 增加小内存分配计数，用于监控和性能分析
         incSmallAllocation();
     }
 
@@ -476,20 +495,72 @@ abstract class PoolArena<T> implements PoolArenaMetric {
         }
     }
 
+    /**
+     * 在内存竞技场中分配正常大小的内存缓冲区。
+     * <p>
+     * 该方法按照特定的顺序遍历内存块列表，尝试在现有内存块中分配请求的内存。
+     * 如果所有现有内存块都无法满足请求，则创建新的内存块并添加到初始化列表中。
+     * </p>
+     * 
+     * <h3>内存块列表查找顺序</h3>
+     * <p>
+     * 查找顺序经过精心设计，旨在平衡内存利用率和分配效率：
+     * <ol>
+     * <li>q050（50% 已用）- 首选，平衡内存利用率</li>
+     * <li>q025（25% 已用）- 第二选择，保留部分内存</li>
+     * <li>q000（接近空闲）- 第三选择，优先使用已分配块</li>
+     * <li>qInit（初始化列表）- 第四选择，新创建但尚未分类的块</li>
+     * <li>q075（75% 已用）- 最后选择，高利用率块留作小分配</li>
+     * </ol>
+     * 这种顺序有助于确保内存利用率保持在合理水平，避免过度分散或过度集中。
+     * </p>
+     * 
+     * <h3>新块分配策略</h3>
+     * <p>
+     * 只有在所有现有块都无法满足请求时才创建新块，这有助于：
+     * <ul>
+     * <li>最小化内存碎片</li>
+     * <li>减少内存消耗</li>
+     * <li>提高缓存效率</li>
+     * </ul>
+     * </p>
+     * 
+     * @param buf         要初始化的ByteBuf对象
+     * @param reqCapacity 请求的容量（字节）
+     * @param sizeIdx     规范化大小的索引值
+     * @param threadCache 线程本地缓存，用于进一步优化
+     */
     private void allocateNormal(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadCache threadCache) {
+        // 确保当前线程持有锁，防止并发修改内存块列表
         assert lock.isHeldByCurrentThread();
+
+        // 按照优化的顺序尝试在现有内存块中分配内存
+        // 首先尝试使用利用率约为50%的块（最佳平衡点）
         if (q050.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+        // 然后尝试使用利用率约为25%的块（较低利用率但非空）
                 q025.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+                // 然后尝试使用接近空的块（保留少量内存的块）
                 q000.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+                // 然后尝试使用初始化列表中的块（新创建但尚未分类的块）
                 qInit.allocate(buf, reqCapacity, sizeIdx, threadCache) ||
+                // 最后尝试使用利用率约为75%的块（几乎已满的块）
                 q075.allocate(buf, reqCapacity, sizeIdx, threadCache)) {
+            // 成功分配，直接返回
             return;
         }
 
-        // Add a new chunk.
+        // 所有现有内存块都无法满足请求，需要创建新的内存块
+
+        // 创建新的内存块，参数包括页面大小、页面索引数、页面位移值和块大小
         PoolChunk<T> c = newChunk(sizeClass.pageSize, sizeClass.nPSizes, sizeClass.pageShifts, sizeClass.chunkSize);
+
+        // 在新创建的块中分配内存
         boolean success = c.allocate(buf, reqCapacity, sizeIdx, threadCache);
+
+        // 断言确保分配成功（新块应该总是能满足请求）
         assert success;
+
+        // 将新块添加到初始化列表中，等待后续根据使用率重新分类
         qInit.add(c);
     }
 
