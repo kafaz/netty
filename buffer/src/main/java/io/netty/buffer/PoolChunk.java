@@ -278,28 +278,90 @@ final class PoolChunk<T> implements PoolChunkMetric {
     // TODO: Test if adding padding helps under contention
     // private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
+    /**
+     * PoolChunk的构造函数，用于初始化一个新的内存块。
+     * <p>
+     * 该构造函数负责初始化一个内存块的所有必要组件，包括：
+     * <ul>
+     *   <li>基本属性（arena、内存地址、大小等）</li>
+     *   <li>运行块管理结构（runsAvail队列数组）</li>
+     *   <li>子页管理结构（subpages数组）</li>
+     *   <li>初始可用运行块</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>内存布局</h3>
+     * <p>
+     * 新创建的内存块初始状态为：
+     * <ul>
+     *   <li>一个完整的可用运行块，大小为整个chunk</li>
+     *   <li>子页数组初始化为空</li>
+     *   <li>运行块可用队列初始化为空</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>关键参数</h3>
+     * <p>
+     * <ul>
+     *   <li>pageSize：页面大小，通常为8KB</li>
+     *   <li>pageShifts：页面大小的位移值，用于快速计算</li>
+     *   <li>chunkSize：整个内存块的大小，通常为16MB</li>
+     *   <li>maxPageIdx：最大页面索引，用于确定运行块队列数组大小</li>
+     * </ul>
+     * </p>
+     *
+     * @param arena 所属的内存分配区域
+     * @param base 内存基址（用于计算实际内存地址）
+     * @param memory 实际的内存对象（ByteBuffer或byte[]）
+     * @param pageSize 页面大小
+     * @param pageShifts 页面大小的位移值
+     * @param chunkSize 内存块大小
+     * @param maxPageIdx 最大页面索引
+     */
     @SuppressWarnings("unchecked")
     PoolChunk(PoolArena<T> arena, Object base, T memory, int pageSize, int pageShifts, int chunkSize, int maxPageIdx) {
+        // 标记这是一个池化的内存块
         unpooled = false;
-        this.arena = arena;
-        this.base = base;
-        this.memory = memory;
-        this.pageSize = pageSize;
-        this.pageShifts = pageShifts;
-        this.chunkSize = chunkSize;
-        this.maxPageIdx = maxPageIdx;
+        
+        // 初始化基本属性
+        this.arena = arena;           // 所属的内存分配区域
+        this.base = base;             // 内存基址
+        this.memory = memory;         // 实际的内存对象
+        this.pageSize = pageSize;     // 页面大小
+        this.pageShifts = pageShifts; // 页面大小的位移值
+        this.chunkSize = chunkSize;   // 内存块大小
+        this.maxPageIdx = maxPageIdx; // 最大页面索引
+        
+        // 初始化可用字节数为整个chunk大小
         freeBytes = chunkSize;
 
+        // 创建运行块可用队列数组，用于管理不同大小的运行块
+        // 数组大小由maxPageIdx决定，每个元素是一个优先级队列
         runsAvail = newRunsAvailqueueArray(maxPageIdx);
+        
+        // 创建运行块管理的锁，用于同步访问
         runsAvailLock = new ReentrantLock();
+        
+        // 创建运行块映射表，用于快速查找运行块
+        // 键为运行块偏移量，值为运行块句柄
         runsAvailMap = new LongLongHashMap(-1);
+        
+        // 创建子页数组，大小为chunk中的页面数量
+        // chunkSize >> pageShifts 计算页面数量
         subpages = new PoolSubpage[chunkSize >> pageShifts];
 
-        // insert initial run, offset = 0, pages = chunkSize / pageSize
+        // 初始化第一个可用运行块
+        // 1. 计算页面数量
         int pages = chunkSize >> pageShifts;
+        // 2. 创建初始运行块句柄
+        // 句柄格式：0...0 0000 0000 0000 0000 0000 0000 0000 0000
+        //           |<-- 页数(15位) -->|<-- 未使用(32位) -->|
         long initHandle = (long) pages << SIZE_SHIFT;
+        // 3. 将初始运行块插入可用运行块映射
         insertAvailRun(0, pages, initHandle);
 
+        // 创建ByteBuffer缓存队列，初始容量为8
+        // 用于缓存已分配的ByteBuffer对象，减少对象创建
         cachedNioBuffers = new ArrayDeque<ByteBuffer>(8);
     }
 
@@ -400,49 +462,144 @@ final class PoolChunk<T> implements PoolChunkMetric {
         return 100 - freePercentage;
     }
 
+    /**
+     * 在当前块中为指定的PooledByteBuf分配内存空间。
+     * <p>
+     * 该方法根据请求大小的不同，采用两种不同的分配策略：
+     * <ul>
+     *   <li>对于小型内存请求(small)，分配子页(subpage)空间</li>
+     *   <li>对于普通内存请求(normal)，分配运行块(run)空间</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>内存分配流程</h3>
+     * <p>
+     * <b>小型内存分配策略：</b>
+     * <ol>
+     *   <li>首先尝试从Arena的子页池(smallSubpagePools)中获取可用子页</li>
+     *   <li>如果有可用子页，直接在其中分配空间</li>
+     *   <li>如果没有可用子页，调用allocateSubpage创建新的子页并分配空间</li>
+     * </ol>
+     * </p>
+     * 
+     * <p>
+     * <b>普通内存分配策略：</b>
+     * <ol>
+     *   <li>计算所需的运行块大小(runSize)</li>
+     *   <li>调用allocateRun方法分配指定大小的运行块</li>
+     * </ol>
+     * </p>
+     * 
+     * <p>
+     * 分配成功后，会使用handle(句柄)初始化提供的PooledByteBuf对象。
+     * 如果可用，会复用缓存的NIO ByteBuffer以减少对象创建。
+     * </p>
+     * 
+     * <h3>线程安全</h3>
+     * <p>
+     * 对于小型内存分配，该方法通过对子页池头节点加锁确保线程安全。
+     * 普通内存分配依赖于调用allocateRun方法的同步机制。
+     * </p>
+     *
+     * @param buf 要初始化的目标ByteBuf对象
+     * @param reqCapacity 请求的容量大小（字节）
+     * @param sizeIdx 标准化后的大小索引，由{@link SizeClasses}提供
+     * @param cache 线程本地缓存，用于优化内存分配
+     * @return 如果分配成功返回true，如果没有足够空间返回false
+     * 
+     * @see PoolSubpage#allocate()
+     * @see #allocateSubpage(int, PoolSubpage)
+     * @see #allocateRun(int)
+     * @see #initBuf(PooledByteBuf, ByteBuffer, long, int, PoolThreadCache)
+     */
     boolean allocate(PooledByteBuf<T> buf, int reqCapacity, int sizeIdx, PoolThreadCache cache) {
+        // 声明内存句柄变量，用于存储分配结果
         final long handle;
+        
+        // 判断请求大小是否为小内存（small或tiny）
         if (sizeIdx <= arena.sizeClass.smallMaxSizeIdx) {
+            // 声明子页变量，用于后续可能的子页分配
             final PoolSubpage<T> nextSub;
-            // small
-            // Obtain the head of the PoolSubPage pool that is owned by the PoolArena and
-            // synchronize on it.
-            // This is need as we may add it back and so alter the linked-list structure.
+            
+            // 获取对应大小索引的子页池头节点
+            // 子页池是按照不同大小组织的双向链表结构
             PoolSubpage<T> head = arena.smallSubpagePools[sizeIdx];
+            
+            // 对子页池头节点加锁，确保线程安全
+            // 因为可能有多个线程同时访问同一个子页池
             head.lock();
             try {
+                // 获取子页池中的第一个可用子页
                 nextSub = head.next;
+                
+                // 检查链表是否为空（如果next指向自身，表示链表为空）
                 if (nextSub != head) {
+                    // 断言验证子页状态正确，确保子页可用且元素大小匹配
+                    // doNotDestroy表示子页正在使用中
+                    // elemSize必须与请求的大小索引对应的实际大小一致
                     assert nextSub.doNotDestroy && nextSub.elemSize == arena.sizeClass.sizeIdx2size(sizeIdx)
                             : "doNotDestroy=" + nextSub.doNotDestroy + ", elemSize=" + nextSub.elemSize + ", sizeIdx=" +
                                     sizeIdx;
+                    
+                    // 从找到的子页中分配内存，返回内存句柄
                     handle = nextSub.allocate();
+                    
+                    // 断言确保分配成功（句柄大于等于0）
                     assert handle >= 0;
+                    
+                    // 断言确保分配的是子页类型内存
                     assert isSubpage(handle);
+                    
+                    // 使用分配的子页内存初始化ByteBuf对象
+                    // 传递null作为nioBuffer参数，表示不使用缓存的ByteBuffer
                     nextSub.chunk.initBufWithSubpage(buf, null, handle, reqCapacity, cache);
+                    
+                    // 返回分配成功
                     return true;
                 }
+                
+                // 如果没有可用子页，则创建新的子页并从中分配内存
                 handle = allocateSubpage(sizeIdx, head);
+                
+                // 如果分配失败（返回-1），表示无法创建新子页
                 if (handle < 0) {
+                    // 返回分配失败
                     return false;
                 }
+                
+                // 断言确保分配的是子页类型内存
                 assert isSubpage(handle);
             } finally {
+                // 无论成功失败，都要解锁子页池头节点
                 head.unlock();
             }
         } else {
-            // normal
-            // runSize must be multiple of pageSize
+            // 处理普通(normal)大小的内存请求，不使用子页
+            
+            // 计算运行块大小，必须是页大小的整数倍
             int runSize = arena.sizeClass.sizeIdx2size(sizeIdx);
+            
+            // 分配指定大小的运行块
             handle = allocateRun(runSize);
+            
+            // 如果分配失败（返回-1），表示无法分配运行块
             if (handle < 0) {
+                // 返回分配失败
                 return false;
             }
+            
+            // 断言确保分配的不是子页类型内存
             assert !isSubpage(handle);
         }
 
+        // 从缓存中获取一个ByteBuffer对象（如果可用）
+        // 这是一个优化，可以减少ByteBuffer对象的创建
         ByteBuffer nioBuffer = cachedNioBuffers != null ? cachedNioBuffers.pollLast() : null;
+        
+        // 使用分配的内存（可能是子页或运行块）初始化ByteBuf对象
         initBuf(buf, nioBuffer, handle, reqCapacity, cache);
+        
+        // 返回分配成功
         return true;
     }
 
@@ -541,14 +698,40 @@ final class PoolChunk<T> implements PoolChunkMetric {
     }
 
     /**
-     * Create / initialize a new PoolSubpage of normCapacity. Any PoolSubpage
-     * created / initialized here is added to
-     * subpage pool in the PoolArena that owns this PoolChunk.
+     * 创建新的子页(PoolSubpage)并从中分配内存。
+     * <p>
+     * 当Arena中没有可用的合适子页时，该方法会被调用来创建一个新的子页。
+     * 首先分配一个运行块(run)，然后在其上创建子页，最后从新创建的子页中分配内存。
+     * 新创建的子页会被添加到Arena的子页池中，以便后续复用。
+     * </p>
+     * 
+     * <h3>子页大小计算</h3>
+     * <p>
+     * 子页大小通过calculateRunSize方法计算，确保：
+     * <ul>
+     *   <li>大小为页大小的整数倍</li>
+     *   <li>大小足够容纳多个元素以提高内存利用率</li>
+     *   <li>大小尽可能接近页大小的最小倍数</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>子页创建与管理</h3>
+     * <p>
+     * 创建的子页会：
+     * <ul>
+     *   <li>被存储在chunk的subpages数组中</li>
+     *   <li>通过双向链表与Arena的子页池连接</li>
+     *   <li>初始化内部位图用于跟踪内存分配状态</li>
+     * </ul>
+     * </p>
      *
-     * @param sizeIdx sizeIdx of normalized size
-     * @param head    head of subpages
-     *
-     * @return index in memoryMap
+     * @param sizeIdx 标准化大小的索引值，用于确定元素大小
+     * @param head 对应大小的子页池头节点，用于链接新创建的子页
+     * @return 成功分配时返回内存句柄，失败时返回-1
+     * 
+     * @see PoolSubpage#allocate()
+     * @see #allocateRun(int)
+     * @see #calculateRunSize(int)
      */
     private long allocateSubpage(int sizeIdx, PoolSubpage<T> head) {
         // allocate a new run
@@ -698,6 +881,40 @@ final class PoolChunk<T> implements PoolChunkMetric {
         }
     }
 
+    /**
+     * 使用子页(subpage)内存初始化PooledByteBuf对象。
+     * <p>
+     * 该方法是小内存分配流程的最后一步，负责将已分配的子页内存与ByteBuf对象关联起来。
+     * 通过解析内存句柄(handle)，计算实际内存地址偏移量，然后将相关参数传递给ByteBuf的init方法。
+     * </p>
+     * 
+     * <h3>内存布局</h3>
+     * <p>
+     * 子页内存在物理上的位置由两部分计算得出：
+     * <ul>
+     *   <li>运行块偏移量(runOffset) - 确定子页在chunk中的页位置</li>
+     *   <li>位图索引(bitmapIdx) - 确定在子页内部的具体位置</li>
+     * </ul>
+     * 最终内存偏移量 = (runOffset << pageShifts) + bitmapIdx * elemSize
+     * </p>
+     * 
+     * <h3>参数验证</h3>
+     * <p>
+     * 方法会验证：
+     * <ul>
+     *   <li>子页必须处于活跃状态(doNotDestroy为true)</li>
+     *   <li>请求容量不能超过子页元素大小</li>
+     * </ul>
+     * </p>
+     *
+     * @param buf 需要初始化的PooledByteBuf对象
+     * @param nioBuffer 可选的缓存NIO ByteBuffer，用于减少对象创建
+     * @param handle 内存句柄，包含子页分配信息
+     * @param reqCapacity 请求的容量大小（字节）
+     * @param threadCache 线程本地缓存，用于优化后续内存操作
+     * 
+     * @see PooledByteBuf#init(PoolChunk, ByteBuffer, long, int, int, int, PoolThreadCache)
+     */
     void initBufWithSubpage(PooledByteBuf<T> buf, ByteBuffer nioBuffer, long handle, int reqCapacity,
             PoolThreadCache threadCache) {
         int runOffset = runOffset(handle);
