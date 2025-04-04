@@ -22,6 +22,7 @@ import java.util.concurrent.locks.ReentrantLock;
 
 import io.netty.util.internal.LongCounter;
 import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.PriorityQueue;
 
 /**
  * PoolChunk中PageRun/PoolSubpage分配算法的详细描述
@@ -165,61 +166,113 @@ import io.netty.util.internal.PlatformDependent;
  * @see SizeClasses
  */
 final class PoolChunk<T> implements PoolChunkMetric {
-    // 用于位操作的常量，定义内存管理中各种标志位的长度
+    /**
+     * 位操作常量组 - 用于定义内存句柄(handle)中各个字段的位长度
+     * 
+     * 所有这些常量共同决定了内存句柄的位布局: 
+     * oooooooo ooooooos ssssssss ssssssue bbbbbbbb bbbbbbbb bbbbbbbb bbbbbbbb
+     */
     private static final int SIZE_BIT_LENGTH = 15; // 大小字段的位长度
     private static final int INUSED_BIT_LENGTH = 1; // 使用标志的位长度
     private static final int SUBPAGE_BIT_LENGTH = 1; // 子页标志的位长度
     private static final int BITMAP_IDX_BIT_LENGTH = 32; // 位图索引的位长度
 
-    // 位移常量，用于构建和解析内存句柄
+    /**
+     * 位移常量组 - 用于位操作时构建和解析内存句柄
+     * 
+     * 这些常量定义了句柄中各字段的偏移位置，使得可以通过位运算有效地提取或设置字段值
+     */
     static final int IS_SUBPAGE_SHIFT = BITMAP_IDX_BIT_LENGTH; // 子页标志的位移
     static final int IS_USED_SHIFT = SUBPAGE_BIT_LENGTH + IS_SUBPAGE_SHIFT; // 使用标志的位移
     static final int SIZE_SHIFT = INUSED_BIT_LENGTH + IS_USED_SHIFT; // 大小字段的位移
     static final int RUN_OFFSET_SHIFT = SIZE_BIT_LENGTH + SIZE_SHIFT; // 运行偏移量的位移
 
-    final PoolArena<T> arena; // 所属的内存竞技场
-    final Object base; // 基础对象，用于内存访问
-    final T memory; // 实际内存对象
-    final boolean unpooled; // 是否不使用池化
-    final int pageSize; // 页面大小
-    final int pageShifts; // 页大小的位移值，用于地址计算
-    final int chunkSize; // 块大小
-    final int maxPageIdx; // 最大页索引
-    int freeBytes; // 可用字节数
+    /** 所属的内存竞技场，负责管理内存分配的更高级别结构 */
+    final PoolArena<T> arena;
+    
+    /** 基础对象，用于内存访问的底层引用，通常是原始内存块的引用 */
+    final Object base;
+    
+    /** 实际内存对象，泛型T可以是直接内存(DirectBuffer)或堆内存(byte[]) */
+    final T memory;
+    
+    /** 指示是否为非池化块，true表示这是一个不参与池化管理的特殊块 */
+    final boolean unpooled;
+    
+    /** 页面大小(字节)，是内存分配的基本单位 */
+    final int pageSize;
+    
+    /** 页大小的位移值，用于快速计算地址(pageSize = 1 << pageShifts) */
+    final int pageShifts;
+    
+    /** 块大小(字节)，表示整个PoolChunk管理的内存总量 */
+    final int chunkSize;
+    
+    /** 最大页索引，用于限制页数组的边界 */
+    final int maxPageIdx;
+    
+    /** 当前块中可用的字节数，随着分配和释放动态变化 */
+    int freeBytes;
 
-    // 存储每个可用运行的第一页和最后一页
+    /**
+     * 可用运行块映射表，用于高效管理和检索可用内存区域
+     * 
+     * 存储格式: 键=runOffset, 值=handle
+     * - 每个运行块由第一页偏移量和最后一页偏移量标识
+     * - 通过这种方式可以快速查找相邻的可用运行块进行合并
+     */
     private final LongLongHashMap runsAvailMap;
 
-    // 管理所有可用的运行区域
+    /**
+     * 可用运行块优先队列数组，按大小分类管理可用运行块
+     * 
+     * 数组索引对应页大小类别，每个队列内部按偏移量排序
+     * 使用优先队列确保总是分配偏移量较小的运行块，有助于减少内存碎片
+     */
     private final IntPriorityQueue[] runsAvail;
 
-    // 线程安全锁
+    /**
+     * 运行块数据结构访问锁，确保在多线程环境下安全操作
+     * 
+     * 保护runsAvailMap和runsAvail数据结构的并发访问
+     */
     private final ReentrantLock runsAvailLock;
 
-    // 管理块中的所有子页
+    /**
+     * 子页数组，管理块中所有的子页实例
+     * 
+     * 索引是页偏移量，每个元素是一个PoolSubpage实例
+     * 用于小内存分配的精细管理
+     */
     private final PoolSubpage<T>[] subpages;
 
     /**
-     * Accounting of pinned memory – memory that is currently in use by ByteBuf
-     * instances.
+     * 固定内存计数器 - 统计当前正在被ByteBuf实例使用的内存量
+     * 
+     * 这个计数器跟踪被"固定"的内存总量，即已分配且正在使用的内存
+     * 用于监控内存使用情况和检测可能的内存泄漏
      */
     private final LongCounter pinnedBytes = PlatformDependent.newLongCounter();
 
     /**
-     * 用作从内存创建的 ByteBuffer 的缓存。这些只是副本，因此只是
-     * 围绕内存本身的容器。这些在 Pooled*ByteBuf 内的操作中经常需要，
-     * 所以可能产生额外的垃圾回收，通过缓存这些副本可以大大减少垃圾回收。
-     *
-     * 如果 PoolChunk 是非池化的，这个字段可能为 null，因为在这种情况下
-     * 池化 ByteBuffer 实例没有任何意义。
+     * ByteBuffer缓存池 - 用于缓存从内存创建的ByteBuffer实例
+     * 
+     * 这些缓存的ByteBuffer实例只是底层内存的视图容器，不包含实际数据
+     * 缓存它们可以显著减少GC压力，因为在Pooled*ByteBuf操作中频繁需要这些视图
+     * 
+     * 特别说明:
+     * 1. 如果PoolChunk是非池化的(unpooled=true)，此字段可能为null
+     * 2. 在非池化情况下，缓存ByteBuffer实例没有意义，因为它们不会被复用
      */
     private final Deque<ByteBuffer> cachedNioBuffers;
 
-    // 指向父级块列表的引用
+    /** 指向父级块列表的引用，用于内存使用率管理和块移动 */
     PoolChunkList<T> parent;
-    // 链表前一个块的引用
+    
+    /** 双向链表中前一个块的引用，便于快速遍历和块管理 */
     PoolChunk<T> prev;
-    // 链表后一个块的引用
+    
+    /** 双向链表中后一个块的引用，便于快速遍历和块管理 */
     PoolChunk<T> next;
 
     // TODO: Test if adding padding helps under contention
