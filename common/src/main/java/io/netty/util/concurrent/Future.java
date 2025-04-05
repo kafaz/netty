@@ -117,7 +117,7 @@ public interface Future<V> extends java.util.concurrent.Future<V> {
     /**
      * 向此Future添加指定的多个监听器。当Future {@linkplain #isDone() 完成}时，
      * 指定的监听器将被通知。如果此Future已经完成，指定的监听器将立即被通知。
-     * <p>
+     * <p
      * 监听器的通知顺序与它们添加的顺序相同。
      * </p>
      * 

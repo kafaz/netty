@@ -1,0 +1,30 @@
+{
+    "mcpServers": {
+      "server-sequential-thinking": {
+        "command": "cmd",
+        "args": [
+          "/c",
+          "npx",
+          "-y",
+          "@smithery/cli@latest",
+          "run",
+          "@smithery-ai/server-sequential-thinking",
+          "--key",
+          "225d76da-1081-41b1-9c04-24e29b245b5a"
+        ]
+      },
+      "think-mcp-server": {
+        "command": "cmd",
+        "args": [
+          "/c",
+          "npx",
+          "-y",
+          "@smithery/cli@latest",
+          "run",
+          "@PhillipRt/think-mcp-server",
+          "--key",
+          "225d76da-1081-41b1-9c04-24e29b245b5a"
+        ]
+      }
+    }
+  }
