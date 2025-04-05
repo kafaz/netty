@@ -17,16 +17,26 @@
 package io.netty.util.concurrent;
 
 import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
-
+/**
+ * {@link ProgressivePromise} 接口的默认实现。
+ * <p>
+ * 此类扩展了 {@link DefaultPromise}，增加了对进度通知的支持，适用于需要报告中间进度的异步操作，
+ * 如文件上传/下载、大型数据传输等长时间运行的操作。
+ * <p>
+ * ProgressivePromise 允许异步操作在最终完成之前报告其进度状态，使调用者能够实时监控操作的执行情况，
+ * 例如显示进度条或估计剩余时间。
+ *
+ * @param <V> 异步操作结果的类型
+ */
 public class DefaultProgressivePromise<V> extends DefaultPromise<V> implements ProgressivePromise<V> {
 
     /**
-     * Creates a new instance.
+     * 创建一个新的 DefaultProgressivePromise 实例。
+     * <p>
+     * 推荐使用 {@link EventExecutor#newProgressivePromise()} 来创建一个新的进度式 Promise，
+     * 而不是直接调用此构造函数。
      *
-     * It is preferable to use {@link EventExecutor#newProgressivePromise()} to create a new progressive promise
-     *
-     * @param executor
-     *        the {@link EventExecutor} which is used to notify the promise when it progresses or it is complete
+     * @param executor 用于在 Promise 进度更新或完成时通知监听器的 {@link EventExecutor}
      */
     public DefaultProgressivePromise(EventExecutor executor) {
         super(executor);

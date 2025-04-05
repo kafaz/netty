@@ -32,7 +32,10 @@ import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
-public class DefaultPromise<V> extends AbstractFuture<V> implements Promise<V> {
+import java.util.Arrays;
+import java.util.Objects;
+
+public class DefaultPromise<V> extends AbstractFuture<V> implements  Promise<V> {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(DefaultPromise.class);
     private static final InternalLogger rejectedExecutionLogger =
             InternalLoggerFactory.getInstance(DefaultPromise.class.getName() + ".rejectedExecution");
@@ -724,14 +727,37 @@ public class DefaultPromise<V> extends AbstractFuture<V> implements Promise<V> {
     }
 
     /**
-     * Notify all progressive listeners.
+     * 通知所有进度监听器当前操作的进度更新。
      * <p>
-     * No attempt is made to ensure notification order if multiple calls are made to this method before
-     * the original invocation completes.
+     * 此方法负责将进度信息分发给所有已注册的 {@link GenericProgressiveFutureListener} 类型的监听器。
+     * 分发机制会考虑执行线程的上下文，确保回调在正确的线程中执行。
      * <p>
-     * This will do an iteration over all listeners to get all of type {@link GenericProgressiveFutureListener}s.
-     * @param progress the new progress.
-     * @param total the total progress.
+     * 当此方法被多次快速调用时，不保证通知顺序。如果在原始调用完成前多次调用此方法，
+     * 可能导致监听器接收到的进度更新不按时间顺序排列。这是一种设计权衡，以提高性能并减少锁竞争。
+     * <p>
+     * 此方法会根据当前执行的线程环境选择不同的通知策略：
+     * <ul>
+     *     <li>如果当前线程是 EventExecutor 的事件循环线程，则直接同步执行监听器通知</li>
+     *     <li>如果当前线程不是事件循环线程，则将通知任务提交到 EventExecutor 中异步执行</li>
+     * </ul>
+     * <p>
+     * 通知过程会识别监听器集合的类型，并分别处理：
+     * <ul>
+     *     <li>单个监听器 - 直接调用单个监听器的通知方法</li>
+     *     <li>监听器数组 - 遍历数组并依次通知每个监听器</li>
+     * </ul>
+     * <p>
+     * 此方法通常不直接由用户代码调用，而是由 {@link #setProgress(long, long)} 或
+     * {@link #tryProgress(long, long)} 方法在进度更新时自动调用。
+     *
+     * @param progress 当前已完成的进度值。当 total 为非负数时，此值应在 0 到 total 范围内；
+     *                当 total 为负数时，此值应大于等于 0
+     * @param total 总进度值。如果进度总量未知，应使用负数（通常为 -1）表示
+     *
+     * @see GenericProgressiveFutureListener
+     * @see ProgressiveFuture
+     * @see #setProgress(long, long)
+     * @see #tryProgress(long, long)
      */
     @SuppressWarnings("unchecked")
     void notifyProgressiveListeners(final long progress, final long total) {
@@ -744,14 +770,18 @@ public class DefaultPromise<V> extends AbstractFuture<V> implements Promise<V> {
 
         EventExecutor executor = executor();
         if (executor.inEventLoop()) {
+            // 在事件循环线程中直接执行通知
             if (listeners instanceof GenericProgressiveFutureListener[]) {
+                // 通知多个监听器
                 notifyProgressiveListeners0(
                         self, (GenericProgressiveFutureListener<?>[]) listeners, progress, total);
             } else {
+                // 通知单个监听器
                 notifyProgressiveListener0(
                         self, (GenericProgressiveFutureListener<ProgressiveFuture<V>>) listeners, progress, total);
             }
         } else {
+            // 不在事件循环线程中，提交任务到事件循环执行
             if (listeners instanceof GenericProgressiveFutureListener[]) {
                 final GenericProgressiveFutureListener<?>[] array =
                         (GenericProgressiveFutureListener<?>[]) listeners;
@@ -822,12 +852,9 @@ public class DefaultPromise<V> extends AbstractFuture<V> implements Promise<V> {
 
     private static void notifyProgressiveListeners0(
             ProgressiveFuture<?> future, GenericProgressiveFutureListener<?>[] listeners, long progress, long total) {
-        for (GenericProgressiveFutureListener<?> l: listeners) {
-            if (l == null) {
-                break;
-            }
-            notifyProgressiveListener0(future, l, progress, total);
-        }
+            Arrays.stream(listeners)
+                    .filter(Objects::nonNull)
+                    .forEach(l->notifyProgressiveListener0(future, l, progress, total));
     }
 
     @SuppressWarnings({ "unchecked", "rawtypes" })
