@@ -35,6 +35,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -603,9 +604,9 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         do {
             // We must run the taskQueue tasks first, because the scheduled tasks from
             // outside the EventLoop are queued
-            // here because the taskQueue is thread safe and the scheduledTaskQueue is not
-            // thread safe.
-            ranAtLeastOneTask = runExistingTasksFrom(taskQueue) | executeExpiredScheduledTasks();
+            // 因为taskQueue是线程安全的，而scheduledTaskQueue不是线程安全的，
+            // 所以我们必须先运行taskQueue中的任务
+            ranAtLeastOneTask = runAllTasksFrom(taskQueue) | executeExpiredScheduledTasks();
         } while (ranAtLeastOneTask && ++drainAttempt < maxDrainAttempts);
 
         if (drainAttempt > 0) {

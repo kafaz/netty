@@ -500,102 +500,155 @@ public final class NioEventLoop extends SingleThreadEventLoop {
         }
     }
 
+    /**
+     * 实现EventLoop的主循环逻辑，处理I/O事件和任务执行。
+     * <p>
+     * 该方法是NioEventLoop的核心，实现了Reactor模式的事件循环。它负责：
+     * <ul>
+     *   <li>根据当前状态计算选择策略（继续、忙等待或选择）</li>
+     *   <li>通过Selector监听I/O事件</li>
+     *   <li>处理准备就绪的I/O事件</li>
+     *   <li>执行提交到事件循环的任务</li>
+     *   <li>平衡I/O事件处理和任务执行的时间分配</li>
+     *   <li>处理异常情况并确保事件循环的稳定运行</li>
+     *   <li>实现优雅关闭流程</li>
+     * </ul>
+     * </p>
+     * <p>
+     * 该方法使用无限循环，直到EventLoop关闭才会返回。整个循环通过try-catch-finally结构
+     * 确保即使发生异常，事件循环也能继续运行或正确关闭。
+     * </p>
+     */
     @Override
     protected void run() {
+        // 记录select操作的计数，用于检测空轮询bug
         int selectCnt = 0;
+        // 无限循环，直到EventLoop关闭
         for (;;) {
             try {
                 int strategy;
                 try {
+                    // 计算选择策略：CONTINUE(继续循环)、BUSY_WAIT(忙等待)或SELECT(阻塞选择)
+                    // selectNowSupplier：是一个IntSupplier函数接口，调用时会立即（非阻塞）检查是否有I/O事件就绪
                     strategy = selectStrategy.calculateStrategy(selectNowSupplier, hasTasks());
                     switch (strategy) {
                     case SelectStrategy.CONTINUE:
+                        // 直接继续循环，不进行select操作
                         continue;
 
                     case SelectStrategy.BUSY_WAIT:
+                        // NIO不支持忙等待，降级为SELECT策略
                         // fall-through to SELECT since the busy-wait is not supported with NIO
 
                     case SelectStrategy.SELECT:
+                        // 获取下一个调度任务的截止时间（纳秒）
                         long curDeadlineNanos = nextScheduledTaskDeadlineNanos();
                         if (curDeadlineNanos == -1L) {
-                            curDeadlineNanos = NONE; // nothing on the calendar
+                            curDeadlineNanos = NONE; // 日程表上没有待执行的任务
                         }
+                        // 设置下次唤醒时间
                         nextWakeupNanos.set(curDeadlineNanos);
                         try {
+                            // 如果没有待处理的任务，则执行select操作
                             if (!hasTasks()) {
+                                // select操作可能会阻塞，直到有I/O事件或达到指定的截止时间
                                 strategy = select(curDeadlineNanos);
                             }
                         } finally {
-                            // This update is just to help block unnecessary selector wakeups
-                            // so use of lazySet is ok (no race condition)
+                            // 更新唤醒状态为AWAKE，防止不必要的selector唤醒
+                            // 使用lazySet是安全的，因为这里不需要立即可见性
                             nextWakeupNanos.lazySet(AWAKE);
                         }
+                        // 策略结果落入默认分支处理
                         // fall through
                     default:
+                        // 使用策略返回值处理后续逻辑
                     }
                 } catch (IOException e) {
-                    // If we receive an IOException here its because the Selector is messed up. Let's rebuild
-                    // the selector and retry. https://github.com/netty/netty/issues/8566
+                    // 如果select操作抛出IOException，表明Selector可能损坏
+                    // 重建Selector并重试，参见：https://github.com/netty/netty/issues/8566
                     rebuildSelector0();
-                    selectCnt = 0;
-                    handleLoopException(e);
-                    continue;
+                    selectCnt = 0; // 重置计数器
+                    handleLoopException(e); // 处理异常
+                    continue; // 继续循环
                 }
 
+                // 增加select计数，用于检测JDK的空轮询bug
                 selectCnt++;
+                // 重置取消的键计数和重选标志
                 cancelledKeys = 0;
                 needsToSelectAgain = false;
+
+                // 获取配置的I/O比率，控制I/O事件和任务执行的时间分配
                 final int ioRatio = this.ioRatio;
                 boolean ranTasks;
+                
                 if (ioRatio == 100) {
+                    // 如果ioRatio是100%，意味着先处理所有I/O事件，然后无限期运行所有任务
                     try {
                         if (strategy > 0) {
+                            // 只有当有选中的键时才处理I/O事件
                             processSelectedKeys();
                         }
                     } finally {
-                        // Ensure we always run tasks.
+                        // 确保即使处理I/O事件抛出异常，也会执行任务
+                        // 执行所有任务，不设时间限制
                         ranTasks = runAllTasks();
                     }
                 } else if (strategy > 0) {
-                    final long ioStartTime = System.nanoTime();
+                    // 如果ioRatio不是100%且有I/O事件，先处理I/O事件，然后根据比例执行任务
+                    final long ioStartTime = System.nanoTime(); // 记录I/O处理开始时间
                     try {
+                        // 处理选中的I/O事件
                         processSelectedKeys();
                     } finally {
-                        // Ensure we always run tasks.
+                        // 计算I/O处理花费的时间
                         final long ioTime = System.nanoTime() - ioStartTime;
+                        // 根据ioRatio计算任务执行时间，确保I/O和任务的时间比例符合配置
+                        // 例如：如果ioRatio=70，I/O用了100ms，那么任务最多用(100*30/70=~43)ms
                         ranTasks = runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
                     }
                 } else {
-                    ranTasks = runAllTasks(0); // This will run the minimum number of tasks
+                    // 如果没有I/O事件，只运行最少数量的任务
+                    ranTasks = runAllTasks(0); // 立即返回，但至少会执行一个任务
                 }
 
+                // 检查是否提前返回了select操作
                 if (selectReturnPrematurely(selectCnt, ranTasks, strategy)) {
-                    selectCnt = 0;
-                } else if (unexpectedSelectorWakeup(selectCnt)) { // Unexpected wakeup (unusual case)
-                    selectCnt = 0;
+                    selectCnt = 0; // 重置计数器
+                } else if (unexpectedSelectorWakeup(selectCnt)) { 
+                    // 处理意外的selector唤醒（罕见情况）
+                    selectCnt = 0; // 重置计数器
                 }
             } catch (CancelledKeyException e) {
-                // Harmless exception - log anyway
+                // 无害异常 - 仍然记录日志
+                // 这通常是JDK的bug导致的
                 if (logger.isDebugEnabled()) {
                     logger.debug(CancelledKeyException.class.getSimpleName() + " raised by a Selector {} - JDK bug?",
                             selector, e);
                 }
             } catch (Error e) {
+                // 错误是严重问题，直接抛出
                 throw e;
             } catch (Throwable t) {
+                // 处理循环中的其他异常
                 handleLoopException(t);
             } finally {
-                // Always handle shutdown even if the loop processing threw an exception.
+                // 即使循环处理抛出异常，也总是处理关闭逻辑
                 try {
                     if (isShuttingDown()) {
+                        // 如果正在关闭，关闭所有通道
                         closeAll();
+                        // 确认关闭完成，如果返回true则退出循环
                         if (confirmShutdown()) {
                             return;
                         }
                     }
                 } catch (Error e) {
+                    // 错误是严重问题，直接抛出
                     throw e;
                 } catch (Throwable t) {
+                    // 处理关闭过程中的异常
                     handleLoopException(t);
                 }
             }

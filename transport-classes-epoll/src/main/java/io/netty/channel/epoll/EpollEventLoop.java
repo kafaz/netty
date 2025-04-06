@@ -44,7 +44,52 @@ import java.util.concurrent.atomic.AtomicLong;
 import static java.lang.Math.min;
 
 /**
- * {@link EventLoop} which uses epoll under the covers. Only works on Linux!
+ * {@link EventLoop} 的Linux特定实现，底层使用epoll系统调用。
+ * <p>
+ * epoll是Linux平台上的高性能I/O多路复用机制，相比传统的select/poll，它具有以下优势：
+ * <ul>
+ *   <li>支持更大规模的并发连接（高达数百万级）</li>
+ *   <li>O(1)的事件通知复杂度，而不是O(n)</li>
+ *   <li>边缘触发(edge-triggered)和水平触发(level-triggered)模式</li>
+ *   <li>避免了内核与用户空间的频繁数据拷贝</li>
+ * </ul>
+ * </p>
+ * <p>
+ * {@code EpollEventLoop}继承自{@link SingleThreadEventLoop}，使用单线程模型处理所有I/O事件和任务。
+ * 它将Java NIO的事件模型映射到Linux的epoll机制，以获得更高的性能和更低的延迟。
+ * </p>
+ * <p>
+ * <strong>注意：</strong>这个实现<em>仅</em>在Linux操作系统上有效。在非Linux系统上尝试使用此类将
+ * 导致异常。请使用{@link NioEventLoop}作为跨平台替代方案，或根据特定平台选择相应的实现
+ * （如在macOS/BSD上使用{@link KQueueEventLoop}）。
+ * </p>
+ * <p>
+ * 使用示例：
+ * <pre>
+ * // 创建EpollEventLoopGroup
+ * EventLoopGroup group = new EpollEventLoopGroup();
+ * try {
+ *     // 配置ServerBootstrap使用EpollEventLoop
+ *     ServerBootstrap bootstrap = new ServerBootstrap();
+ *     bootstrap.group(group)
+ *              .channel(EpollServerSocketChannel.class) // 使用对应的EpollServerSocketChannel
+ *              .childHandler(new ChannelInitializer&lt;SocketChannel&gt;() {
+ *                  // 配置ChannelPipeline
+ *              });
+ *     
+ *     // 绑定端口
+ *     ChannelFuture future = bootstrap.bind(8080).sync();
+ *     future.channel().closeFuture().sync();
+ * } finally {
+ *     // 关闭资源
+ *     group.shutdownGracefully();
+ * }
+ * </pre>
+ * </p>
+ * 
+ * @see io.netty.channel.epoll.EpollEventLoopGroup
+ * @see io.netty.channel.epoll.EpollServerSocketChannel
+ * @see io.netty.channel.epoll.EpollSocketChannel
  */
 public class EpollEventLoop extends SingleThreadEventLoop {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(EpollEventLoop.class);
