@@ -460,77 +460,123 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             return remoteAddress0();
         }
 
+        /**
+         * 将通道注册到指定的事件循环(EventLoop)上
+         * <p>
+         * 该方法负责将当前通道与提供的EventLoop关联起来，这是通道生命周期中的关键步骤。
+         * 注册过程可能会同步或异步执行，这取决于当前线程是否为EventLoop线程。
+         * </p>
+         * 
+         * @param eventLoop 要将通道注册到的事件循环，不能为null
+         * @param promise 用于通知注册操作结果的promise对象
+         * 
+         * @throws IllegalStateException 如果通道已经注册到某个事件循环
+         * @throws IllegalStateException 如果提供的事件循环类型与通道不兼容
+         */
         @Override
         public final void register(EventLoop eventLoop, final ChannelPromise promise) {
+            // 检查eventLoop参数不为null
             ObjectUtil.checkNotNull(eventLoop, "eventLoop");
             if (isRegistered()) {
+                // 如果通道已经注册到某个事件循环，则设置失败并立即返回
                 promise.setFailure(new IllegalStateException("registered to an event loop already"));
                 return;
             }
             if (!isCompatible(eventLoop)) {
+                // 检查事件循环类型与通道是否兼容，如不兼容则设置失败并立即返回
                 promise.setFailure(
                         new IllegalStateException("incompatible event loop type: " + eventLoop.getClass().getName()));
                 return;
             }
 
+            // 将当前通道与指定的事件循环关联
             AbstractChannel.this.eventLoop = eventLoop;
 
             if (eventLoop.inEventLoop()) {
+                // 如果当前线程就是事件循环线程，则直接进行注册操作
                 register0(promise);
             } else {
+                // 如果当前线程不是事件循环线程，则将注册任务提交到事件循环中异步执行
                 try {
                     eventLoop.execute(new Runnable() {
                         @Override
                         public void run() {
+                            // 在事件循环线程中执行实际的注册操作
                             register0(promise);
                         }
                     });
                 } catch (Throwable t) {
+                    // 如果任务提交失败(例如事件循环已关闭或拒绝任务)，则记录警告日志
                     logger.warn(
                             "Force-closing a channel whose registration task was not accepted by an event loop: {}",
                             AbstractChannel.this, t);
+                    // 强制关闭通道
                     closeForcibly();
+                    // 标记关闭future为已完成
                     closeFuture.setClosed();
+                    // 设置promise为失败，并传递导致失败的异常
                     safeSetFailure(promise, t);
                 }
             }
         }
 
+        /**
+         * 执行通道注册到事件循环的实际操作
+         * <p>
+         * 该方法是通道注册过程的核心实现，包括以下步骤：
+         * 1. 调用底层的doRegister()方法完成实际的注册
+         * 2. 更新通道的注册状态
+         * 3. 确保所有处理器被正确添加到管道中
+         * 4. 触发相应的通道事件（注册事件和可能的激活事件）
+         * </p>
+         * <p>
+         * 该方法总是在事件循环线程中执行，确保了所有操作的线程安全性。
+         * </p>
+         * 
+         * @param promise 用于通知注册操作结果的promise对象
+         */
         private void register0(ChannelPromise promise) {
             try {
-                // check if the channel is still open as it could be closed in the mean time when the register
-                // call was outside of the eventLoop
+                // 检查通道是否仍然打开，因为在注册调用在事件循环外部时，通道可能在此期间已关闭
                 if (!promise.setUncancellable() || !ensureOpen(promise)) {
                     return;
                 }
+                // 记录这是否是通道的首次注册
                 boolean firstRegistration = neverRegistered;
+                // 调用抽象方法执行实际的注册操作（由具体子类实现）
                 doRegister();
+                // 更新通道的注册状态
                 neverRegistered = false;
                 registered = true;
 
-                // Ensure we call handlerAdded(...) before we actually notify the promise. This is needed as the
-                // user may already fire events through the pipeline in the ChannelFutureListener.
+                // 确保在通知promise之前调用handlerAdded(...)。这是必要的，因为
+                // 用户可能已经在ChannelFutureListener中通过管道触发事件。
                 pipeline.invokeHandlerAddedIfNeeded();
 
+                // 标记promise为成功完成
                 safeSetSuccess(promise);
+                // 触发通道注册事件
                 pipeline.fireChannelRegistered();
-                // Only fire a channelActive if the channel has never been registered. This prevents firing
-                // multiple channel actives if the channel is deregistered and re-registered.
+                // 仅当通道之前从未注册过时才触发channelActive事件。这可以防止
+                // 在通道取消注册和重新注册时多次触发通道激活事件。
                 if (isActive()) {
                     if (firstRegistration) {
+                        // 如果是首次注册且通道处于活动状态，则触发通道激活事件
                         pipeline.fireChannelActive();
                     } else if (config().isAutoRead()) {
-                        // This channel was registered before and autoRead() is set. This means we need to begin read
-                        // again so that we process inbound data.
+                        // 如果通道之前已注册并且设置了autoRead()，这意味着我们需要重新开始读取
+                        // 以便处理入站数据。
                         //
-                        // See https://github.com/netty/netty/issues/4805
+                        // 参见 https://github.com/netty/netty/issues/4805
                         beginRead();
                     }
                 }
             } catch (Throwable t) {
-                // Close the channel directly to avoid FD leak.
+                // 直接关闭通道以避免文件描述符泄漏
                 closeForcibly();
+                // 标记关闭future为已完成
                 closeFuture.setClosed();
+                // 设置promise为失败，并传递异常
                 safeSetFailure(promise, t);
             }
         }
@@ -541,19 +587,6 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
             if (!promise.setUncancellable() || !ensureOpen(promise)) {
                 return;
-            }
-
-            // See: https://github.com/netty/netty/issues/576
-            if (Boolean.TRUE.equals(config().getOption(ChannelOption.SO_BROADCAST)) &&
-                localAddress instanceof InetSocketAddress &&
-                !((InetSocketAddress) localAddress).getAddress().isAnyLocalAddress() &&
-                !PlatformDependent.isWindows() && !PlatformDependent.maybeSuperUser()) {
-                // Warn a user about the fact that a non-root user can't receive a
-                // broadcast packet on *nix if the socket is bound on non-wildcard address.
-                logger.warn(
-                        "A non-root user can't receive a broadcast packet if the socket " +
-                        "is not bound to a wildcard address; binding to a non-wildcard " +
-                        "address (" + localAddress + ") anyway as requested.");
             }
 
             boolean wasActive = isActive();

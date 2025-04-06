@@ -35,7 +35,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -448,6 +447,31 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
     }
 
+    /**
+     * 尝试将已到期的调度任务从调度任务队列转移到主任务队列中。
+     * <p>
+     * 该方法负责将已经到期的调度任务（{@code scheduledTaskQueue}）转移到常规任务队列（{@code taskQueue}）中以便执行。
+     * 方法执行流程如下：
+     * <ol>
+     *   <li>检查调度任务队列是否为空，如果为空则直接返回{@code true}</li>
+     *   <li>获取当前时间以确定哪些调度任务已到期</li>
+     *   <li>循环从调度任务队列中取出已到期的任务：
+     *     <ul>
+     *       <li>如果没有更多已到期的任务，则返回{@code true}</li>
+     *       <li>尝试将任务添加到主任务队列中</li>
+     *       <li>如果主任务队列已满，将任务放回调度队列并返回{@code false}</li>
+     *     </ul>
+     *   </li>
+     * </ol>
+     * </p>
+     * <p>
+     * 此方法与{@link #executeExpiredScheduledTasks()}的区别在于：本方法只是将任务从调度队列移到主队列，
+     * 而不直接执行任务。这样设计使得调度任务最终通过同一个任务执行路径处理，简化了任务执行逻辑。
+     * </p>
+     * 
+     * @return {@code true} 如果所有到期的调度任务都成功转移到主任务队列，或者没有到期的调度任务；
+     *         {@code false} 如果主任务队列已满，无法接收更多任务
+     */
     private boolean fetchFromScheduledTaskQueue() {
         if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
             return true;
