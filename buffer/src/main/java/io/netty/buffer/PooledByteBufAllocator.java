@@ -41,6 +41,53 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  * PooledByteBufAllocator是Netty默认的内存分配器，实现了高效的内存池管理，
  * 包含堆内存和直接内存两种类型的内存池，以及支持多级缓存的线程本地缓存机制。
  * </p>
+ * 
+ * <h3>内存池化架构</h3>
+ * 内存分配的层次结构：
+ * 
+ * <pre>
+ * PooledByteBufAllocator
+ *  ├── PoolArena[] (heapArenas/directArenas)
+ *  │    ├── PoolChunkList (qInit/q000/q025/q050/q075/q100)
+ *  │    │    └── PoolChunk
+ *  │    │         └── memory (byte[]/ByteBuffer)
+ *  │    └── PoolSubpage
+ *  └── PoolThreadCache (threadCache)
+ *       ├── MemoryRegionCache[] (tiny缓存)
+ *       ├── MemoryRegionCache[] (small缓存)
+ *       └── MemoryRegionCache[] (normal缓存)
+ * </pre>
+ * 
+ * <h3>关键组件</h3>
+ * <ul>
+ * <li><b>PoolArena</b>: 内存区域管理单元，每个线程使用一个特定的Arena以减少竞争</li>
+ * <li><b>PoolChunk</b>: 大块内存块，默认16MB，使用伙伴算法进行内存分配</li>
+ * <li><b>PoolSubpage</b>: 管理小于一个页(默认8KB)的内存分配，使用位图追踪</li>
+ * <li><b>PoolThreadCache</b>: 线程本地缓存，提高分配/释放性能，减少跨线程同步</li>
+ * </ul>
+ * 
+ * <h3>内存大小分类</h3>
+ * <ul>
+ * <li><b>Tiny</b>: 小于512字节的内存块</li>
+ * <li><b>Small</b>: 介于512字节和一个页大小(8KB)之间的内存块</li>
+ * <li><b>Normal</b>: 介于一个页大小和chunk最大大小(16MB)之间的内存块</li>
+ * <li><b>Huge</b>: 大于一个chunk(16MB)的内存块，不进行池化管理</li>
+ * </ul>
+ * 
+ * <h3>性能优化策略</h3>
+ * <ul>
+ * <li>多Arena设计：减少线程间竞争</li>
+ * <li>伙伴分配算法：高效管理大块内存</li>
+ * <li>位图追踪：高效管理小块内存</li>
+ * <li>线程本地缓存：加速内存分配和回收</li>
+ * <li>内存复用：减少实际分配和释放操作</li>
+ * </ul>
+ * 
+ * @see PoolArena
+ * @see PoolChunk
+ * @see PoolSubpage
+ * @see PoolThreadCache
+ * @see ByteBufAllocator
  */
 public class PooledByteBufAllocator extends AbstractByteBufAllocator implements ByteBufAllocatorMetricProvider {
 
@@ -84,53 +131,88 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         }
     };
 
+    /**
+     * 静态初始化块，负责初始化PooledByteBufAllocator的各项默认配置参数。
+     * <p>
+     * 此块完成以下初始化工作：
+     * <ol>
+     * <li>计算内存页大小和对齐方式</li>
+     * <li>确定最大order值(影响chunk大小)</li>
+     * <li>计算堆内存和直接内存Arena的默认数量</li>
+     * <li>设置各级缓存的大小和阈值</li>
+     * <li>配置缓存清理策略</li>
+     * </ol>
+     * </p>
+     */
     static {
+        // 步骤1: 初始化内存对齐参数
+        // 从系统属性读取直接内存对齐值，默认为0表示不进行特殊对齐
         int defaultAlignment = SystemPropertyUtil.getInt(
                 "io.netty.allocator.directMemoryCacheAlignment", 0);
+        // 从系统属性读取页大小，默认为8KB(8192字节)
         int defaultPageSize = SystemPropertyUtil.getInt("io.netty.allocator.pageSize", 8192);
         Throwable pageSizeFallbackCause = null;
         try {
+            // 验证页大小和对齐方式是否有效
             validateAndCalculatePageShifts(defaultPageSize, defaultAlignment);
         } catch (Throwable t) {
+            // 如果参数无效，记录异常并回退到默认值
             pageSizeFallbackCause = t;
-            defaultPageSize = 8192;
-            defaultAlignment = 0;
+            defaultPageSize = 8192; // 回退到8KB的标准页大小
+            defaultAlignment = 0; // 取消内存对齐要求
         }
+        // 设置页大小和内存对齐常量
         DEFAULT_PAGE_SIZE = defaultPageSize;
         DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT = defaultAlignment;
 
+        // 步骤2: 初始化最大order值
+        // 从系统属性读取最大order值，默认为9，表示chunk大小为pageSize<<9 (8KB*512=4MB)
         int defaultMaxOrder = SystemPropertyUtil.getInt("io.netty.allocator.maxOrder", 9);
         Throwable maxOrderFallbackCause = null;
         try {
+            // 验证maxOrder是否会导致有效的chunk大小
             validateAndCalculateChunkSize(DEFAULT_PAGE_SIZE, defaultMaxOrder);
         } catch (Throwable t) {
+            // 如果参数无效，记录异常并回退到默认值9
             maxOrderFallbackCause = t;
             defaultMaxOrder = 9;
         }
         DEFAULT_MAX_ORDER = defaultMaxOrder;
 
-        // Determine reasonable default for nHeapArena and nDirectArena.
-        // Assuming each arena has 3 chunks, the pool should not consume more than 50%
-        // of max memory.
+        // 步骤3: 计算堆内存和直接内存Arena的默认数量
+        // 目标：确保内存池不会占用过多系统内存
+        // 假设每个Arena有3个chunks，池不应该消耗超过总可用内存的50%
         final Runtime runtime = Runtime.getRuntime();
 
         /*
-         * We use 2 * available processors by default to reduce contention as we use 2 *
-         * available processors for the
-         * number of EventLoops in NIO and EPOLL as well. If we choose a smaller number
-         * we will run into hot spots as
-         * allocation and de-allocation needs to be synchronized on the PoolArena.
+         * 默认使用处理器数量的2倍作为Arena数量，这是为了减少竞争。
+         * 这与NIO和EPOLL使用的EventLoop数量策略一致(通常是处理器数的2倍)。
+         * 如果选择更小的数量，可能导致Arena上的分配和释放操作出现热点竞争。
          *
-         * See https://github.com/netty/netty/issues/3888.
+         * 详见：https://github.com/netty/netty/issues/3888
          */
+        // 计算默认Arena数量：处理器数量的2倍
         final int defaultMinNumArena = NettyRuntime.availableProcessors() * 2;
+        // 计算默认chunk大小 = 页大小 * 2^最大order
         final int defaultChunkSize = DEFAULT_PAGE_SIZE << DEFAULT_MAX_ORDER;
+
+        // 计算堆Arena数量：取配置值与自动计算值的较小者
+        // 自动计算逻辑确保Arena总内存不超过JVM最大内存的50%(考虑每个Arena包含3个chunks)
+        // 计算堆Arena数量：取配置值与自动计算值的较小者
+        // 自动计算逻辑确保Arena总内存不超过JVM最大内存的50%(考虑每个Arena包含3个chunks)
+        // 公式解析：runtime.maxMemory() / defaultChunkSize / 2 / 3
+        // - /defaultChunkSize：计算JVM最大内存可容纳的chunk总数
+        // - /2：限制内存池最多占用系统内存的50%，剩余空间留给非池化分配和JVM其他用途
+        // - /3：假设每个Arena管理3个chunk，计算所需的Arena数量
+        // 这样设计确保了内存使用、Arena负载和并发性能三者的平衡
         DEFAULT_NUM_HEAP_ARENA = Math.max(0,
                 SystemPropertyUtil.getInt(
                         "io.netty.allocator.numHeapArenas",
                         (int) Math.min(
                                 defaultMinNumArena,
                                 runtime.maxMemory() / defaultChunkSize / 2 / 3)));
+
+        // 计算直接内存Arena数量：类似逻辑，但基于最大直接内存而非JVM堆内存
         DEFAULT_NUM_DIRECT_ARENA = Math.max(0,
                 SystemPropertyUtil.getInt(
                         "io.netty.allocator.numDirectArenas",
@@ -138,73 +220,110 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
                                 defaultMinNumArena,
                                 PlatformDependent.maxDirectMemory() / defaultChunkSize / 2 / 3)));
 
-        // cache sizes
+        // 步骤4: 配置缓存大小参数
+        // 设置小型缓存大小，用于small类别的内存块
         DEFAULT_SMALL_CACHE_SIZE = SystemPropertyUtil.getInt("io.netty.allocator.smallCacheSize", 256);
+        // 设置普通缓存大小，用于normal类别的内存块
         DEFAULT_NORMAL_CACHE_SIZE = SystemPropertyUtil.getInt("io.netty.allocator.normalCacheSize", 64);
 
-        // 32 kb is the default maximum capacity of the cached buffer. Similar to what
-        // is explained in
-        // 'Scalable memory allocation using jemalloc'
+        // 设置可缓存的最大缓冲区容量，默认32KB
+        // 这个设计参考了'Scalable memory allocation using jemalloc'论文的建议
         DEFAULT_MAX_CACHED_BUFFER_CAPACITY = SystemPropertyUtil.getInt(
                 "io.netty.allocator.maxCachedBufferCapacity", 32 * 1024);
 
-        // the number of threshold of allocations when cached entries will be freed up
-        // if not frequently used
+        // 设置缓存清理阈值：达到这个分配次数后会检查并清理不常用的缓存条目
         DEFAULT_CACHE_TRIM_INTERVAL = SystemPropertyUtil.getInt(
                 "io.netty.allocator.cacheTrimInterval", 8192);
 
+        // 步骤5: 配置缓存清理时间间隔
+        // 处理兼容性：检查旧配置项是否存在
         if (SystemPropertyUtil.contains("io.netty.allocation.cacheTrimIntervalMillis")) {
+            // 警告用户使用了过时的配置名称
             logger.warn("-Dio.netty.allocation.cacheTrimIntervalMillis is deprecated," +
                     " use -Dio.netty.allocator.cacheTrimIntervalMillis");
 
+            // 如果新旧配置都存在，优先使用新配置
             if (SystemPropertyUtil.contains("io.netty.allocator.cacheTrimIntervalMillis")) {
-                // Both system properties are specified. Use the non-deprecated one.
+                // 使用新的配置名称
                 DEFAULT_CACHE_TRIM_INTERVAL_MILLIS = SystemPropertyUtil.getLong(
                         "io.netty.allocator.cacheTrimIntervalMillis", 0);
             } else {
+                // 使用旧的配置名称
                 DEFAULT_CACHE_TRIM_INTERVAL_MILLIS = SystemPropertyUtil.getLong(
                         "io.netty.allocation.cacheTrimIntervalMillis", 0);
             }
         } else {
+            // 只使用新的配置名称
             DEFAULT_CACHE_TRIM_INTERVAL_MILLIS = SystemPropertyUtil.getLong(
                     "io.netty.allocator.cacheTrimIntervalMillis", 0);
         }
 
+        // 步骤6: 其他配置选项
+        // 决定哪些线程可以使用PoolThreadCache线程本地缓存
+        // 是否为所有线程启用缓存，默认只为Netty的I/O线程启用
+        // 业务流程影响：
+        // - 当应用程序线程调用allocate()方法时，决定是否为该线程创建PoolThreadCache
+        // - I/O线程（如EventLoop线程）总是获得缓存，以优化网络处理性能
+        // - 应用业务线程默认不使用缓存，除非显式配置
         DEFAULT_USE_CACHE_FOR_ALL_THREADS = SystemPropertyUtil.getBoolean(
                 "io.netty.allocator.useCacheForAllThreads", false);
 
+        // 是否为FastThreadLocal线程禁用缓存终结器
+        // 业务流程影响：
+        // - 当FastThreadLocal线程调用release()方法时，决定是否禁用缓存终结器
+        // - I/O线程（如EventLoop线程）总是获得缓存，以优化网络处理性能
+        // - 应用业务线程默认不使用缓存，除非显式配置
         DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS = SystemPropertyUtil.getBoolean(
                 "io.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads", false);
-
-        // Use 1023 by default as we use an ArrayDeque as backing storage which will
-        // then allocate an internal array
-        // of 1024 elements. Otherwise we would allocate 2048 and only use 1024 which is
-        // wasteful.
+        // 设置每个chunk最大缓存的ByteBuffer数量
+        // 使用1023而非1024是因为使用ArrayDeque作为存储，它会分配内部数组为1024
+        // 如果设置为1024，实际会分配2048大小的数组，浪费空间
+        // 业务流程影响：
+        // - 当Buffer被释放时，它可能被放入线程本地缓存以便重用
+        // - 此值限制每个chunk可以在缓存中保留多少个释放的buffer
+        // - 防止缓存无限增长，造成内存泄漏
         DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK = SystemPropertyUtil.getInt(
                 "io.netty.allocator.maxCachedByteBuffersPerChunk", 1023);
 
+        // 步骤7: 在调试级别记录所有配置参数
         if (logger.isDebugEnabled()) {
+            // 记录堆内存Arena数量
             logger.debug("-Dio.netty.allocator.numHeapArenas: {}", DEFAULT_NUM_HEAP_ARENA);
+            // 记录直接内存Arena数量
             logger.debug("-Dio.netty.allocator.numDirectArenas: {}", DEFAULT_NUM_DIRECT_ARENA);
+
+            // 记录页大小，如果有回退错误则同时记录错误原因
             if (pageSizeFallbackCause == null) {
                 logger.debug("-Dio.netty.allocator.pageSize: {}", DEFAULT_PAGE_SIZE);
             } else {
                 logger.debug("-Dio.netty.allocator.pageSize: {}", DEFAULT_PAGE_SIZE, pageSizeFallbackCause);
             }
+
+            // 记录最大order值，如果有回退错误则同时记录错误原因
             if (maxOrderFallbackCause == null) {
                 logger.debug("-Dio.netty.allocator.maxOrder: {}", DEFAULT_MAX_ORDER);
             } else {
                 logger.debug("-Dio.netty.allocator.maxOrder: {}", DEFAULT_MAX_ORDER, maxOrderFallbackCause);
             }
+
+            // 记录计算得到的chunk大小
             logger.debug("-Dio.netty.allocator.chunkSize: {}", DEFAULT_PAGE_SIZE << DEFAULT_MAX_ORDER);
+            // 记录小型缓存大小
             logger.debug("-Dio.netty.allocator.smallCacheSize: {}", DEFAULT_SMALL_CACHE_SIZE);
+            // 记录普通缓存大小
             logger.debug("-Dio.netty.allocator.normalCacheSize: {}", DEFAULT_NORMAL_CACHE_SIZE);
+            // 记录最大可缓存的缓冲区容量
             logger.debug("-Dio.netty.allocator.maxCachedBufferCapacity: {}", DEFAULT_MAX_CACHED_BUFFER_CAPACITY);
+            // 记录缓存清理间隔(分配次数)
             logger.debug("-Dio.netty.allocator.cacheTrimInterval: {}", DEFAULT_CACHE_TRIM_INTERVAL);
+            // 记录缓存清理间隔(毫秒)
             logger.debug("-Dio.netty.allocator.cacheTrimIntervalMillis: {}", DEFAULT_CACHE_TRIM_INTERVAL_MILLIS);
+            // 记录是否为所有线程启用缓存
             logger.debug("-Dio.netty.allocator.useCacheForAllThreads: {}", DEFAULT_USE_CACHE_FOR_ALL_THREADS);
+            // 记录每个chunk最大缓存的ByteBuffer数量
             logger.debug("-Dio.netty.allocator.maxCachedByteBuffersPerChunk: {}",
                     DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK);
+            // 记录是否为FastThreadLocal线程禁用缓存终结器
             logger.debug("-Dio.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads: {}",
                     DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS);
         }
@@ -349,8 +468,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     @Deprecated
     public PooledByteBufAllocator(boolean preferDirect, int nHeapArena, int nDirectArena, int pageSize, int maxOrder,
             int tinyCacheSize, int smallCacheSize, int normalCacheSize) {
-        this(preferDirect, nHeapArena, nDirectArena, pageSize, maxOrder, smallCacheSize,
-                normalCacheSize, DEFAULT_USE_CACHE_FOR_ALL_THREADS, DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT);
+        this(preferDirect, nHeapArena, nDirectArena, pageSize, maxOrder, smallCacheSize, normalCacheSize, DEFAULT_USE_CACHE_FOR_ALL_THREADS, DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT);
     }
 
     /**
@@ -512,9 +630,8 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
             buf = heapArena.allocate(cache, initialCapacity, maxCapacity);
         } else {
             // 5. 非池化分配
-            buf = PlatformDependent.hasUnsafe() ? 
-                new UnpooledUnsafeHeapByteBuf(this, initialCapacity, maxCapacity) :
-                new UnpooledHeapByteBuf(this, initialCapacity, maxCapacity);
+            buf = PlatformDependent.hasUnsafe() ? new UnpooledUnsafeHeapByteBuf(this, initialCapacity, maxCapacity)
+                    : new UnpooledHeapByteBuf(this, initialCapacity, maxCapacity);
         }
         // 6. 包装为支持内存泄漏检测的缓冲区
         return toLeakAwareBuffer(buf);
@@ -717,63 +834,141 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         threadCache.remove();
     }
 
+    /**
+     * 线程本地缓存管理器，为每个线程提供专用的内存缓存。
+     * <p>
+     * 此类继承自FastThreadLocal，为每个访问的线程创建和维护独立的PoolThreadCache实例。
+     * 它实现了Netty内存池的线程隔离策略，是减少多线程内存分配竞争的核心机制。
+     * </p>
+     * 
+     * <h3>工作原理</h3>
+     * <ol>
+     * <li>首次访问：线程首次请求内存时，调用initialValue()创建专属缓存</li>
+     * <li>Arena分配：为线程分配负载最低的PoolArena，实现负载均衡</li>
+     * <li>条件判断：根据线程类型和配置决定是否启用完整缓存</li>
+     * <li>缓存清理：配置定期执行的缓存修剪任务，防止内存泄漏</li>
+     * <li>资源释放：线程终止时自动调用onRemoval()清理相关资源</li>
+     * </ol>
+     *
+     * <h3>性能影响</h3>
+     * <p>
+     * 此缓存机制能显著提升内存密集型应用的性能，特别是在高并发场景下：
+     * <ul>
+     * <li>减少锁竞争：缓存隔离降低多线程同步开销</li>
+     * <li>加速分配：频繁使用的内存大小可以从缓存快速分配</li>
+     * <li>减少GC：内存复用降低垃圾收集压力</li>
+     * </ul>
+     * </p>
+     *
+     * @see PoolThreadCache 线程本地缓存的实际实现类
+     * @see FastThreadLocal Netty优化的线程本地变量，性能优于JDK ThreadLocal
+     */
     private final class PoolThreadLocalCache extends FastThreadLocal<PoolThreadCache> {
+        // 是否为所有类型的线程启用缓存，默认false（仅为Netty I/O线程启用）
         private final boolean useCacheForAllThreads;
 
+        /**
+         * 构造线程本地缓存管理器
+         * 
+         * @param useCacheForAllThreads 是否为所有线程类型启用缓存
+         */
         PoolThreadLocalCache(boolean useCacheForAllThreads) {
             this.useCacheForAllThreads = useCacheForAllThreads;
         }
 
+        /**
+         * 为当前线程创建专用的内存缓存实例。
+         * <p>
+         * 此方法虽然在概念上只被单个线程调用（ThreadLocal模式），但仍需使用synchronized修饰，原因如下：
+         * <ul>
+         * <li>共享资源访问：方法内部会调用leastUsedArena()选择并更新Arena的线程计数器</li>
+         * <li>负载均衡一致性：同步确保在选择Arena过程中，其他线程不会同时修改计数值</li>
+         * <li>防止竞态条件：没有同步时，多个线程可能同时选择同一个Arena，破坏负载均衡</li>
+         * </ul>
+         * </p>
+         * 
+         * <h3>示例场景（无同步时）</h3>
+         * <ol>
+         * <li>线程A和线程B同时执行initialValue()</li>
+         * <li>两个线程都读取Arena1的numThreadCaches值为0</li>
+         * <li>两个线程都认为Arena1是负载最低的并选择它</li>
+         * <li>结果Arena1获得2个线程，而其他可能空闲的Arena未被使用</li>
+         * </ol>
+         * @return 为当前线程创建的PoolThreadCache实例
+         */
         @Override
         protected synchronized PoolThreadCache initialValue() {
+            // 选择负载最低的Arena分配给当前线程，实现负载均衡
             final PoolArena<byte[]> heapArena = leastUsedArena(heapArenas);
             final PoolArena<ByteBuffer> directArena = leastUsedArena(directArenas);
 
+            // 获取当前线程信息
             final Thread current = Thread.currentThread();
+            // 检查当前线程是否关联到EventExecutor
             final EventExecutor executor = ThreadExecutorMap.currentExecutor();
 
+            // 决定是否为当前线程启用完整缓存功能
             if (useCacheForAllThreads ||
-            // If the current thread is a FastThreadLocalThread we will always use the cache
+            // 如果是FastThreadLocalThread类型（Netty优化的线程），总是启用缓存
                     current instanceof FastThreadLocalThread ||
-                    // The Thread is used by an EventExecutor, let's use the cache as the chances
-                    // are good that we
-                    // will allocate a lot!
+                    // 如果线程被EventExecutor使用，很可能会进行大量内存分配，启用缓存
                     executor != null) {
+                // 创建完整功能的缓存，配置缓存大小和清理参数
                 final PoolThreadCache cache = new PoolThreadCache(
                         heapArena, directArena, smallCacheSize, normalCacheSize,
                         DEFAULT_MAX_CACHED_BUFFER_CAPACITY, DEFAULT_CACHE_TRIM_INTERVAL, useCacheFinalizers(current));
 
+                // 如果配置了缓存清理间隔，添加定期执行的清理任务
                 if (DEFAULT_CACHE_TRIM_INTERVAL_MILLIS > 0) {
                     if (executor != null) {
+                        // 在EventExecutor上调度定期执行的缓存清理任务
                         executor.scheduleAtFixedRate(trimTask, DEFAULT_CACHE_TRIM_INTERVAL_MILLIS,
                                 DEFAULT_CACHE_TRIM_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
                     }
                 }
                 return cache;
             }
-            // No caching so just use 0 as sizes.
+            // 不启用缓存，创建零容量缓存对象（实际不缓存任何内存）
             return new PoolThreadCache(heapArena, directArena, 0, 0, 0, 0, false);
         }
 
         @Override
         protected void onRemoval(PoolThreadCache threadCache) {
+            // 当线程终止或显式移除缓存时，释放所有缓存的内存
             threadCache.free(false);
         }
 
+        /**
+         * 为当前线程选择负载最低的Arena，实现负载均衡
+         * <p>
+         * 此方法通过检查每个Arena当前绑定的线程缓存数量，
+         * 选择绑定线程最少的Arena分配给当前线程，
+         * 从而减少多线程在同一个Arena上竞争的概率。
+         * </p>
+         *
+         * @param <T>    Arena类型参数（byte[]用于堆内存，ByteBuffer用于直接内存）
+         * @param arenas 可用的Arena数组
+         * @return 负载最低的Arena，如果没有可用Arena则返回null
+         */
         private <T> PoolArena<T> leastUsedArena(PoolArena<T>[] arenas) {
+            // 无可用Arena时返回null
             if (arenas == null || arenas.length == 0) {
                 return null;
             }
 
+            // 默认选择第一个Arena作为初始最小负载Arena
             PoolArena<T> minArena = arenas[0];
-            // optimized
-            // If it is the first execution, directly return minarena and reduce the number
-            // of for loop comparisons below
+
+            // 优化：如果第一个Arena从未被使用过，直接返回它
+            // 这可以避免不必要的循环比较，提高性能
             if (minArena.numThreadCaches.get() == CACHE_NOT_USED) {
                 return minArena;
             }
+
+            // 遍历所有Arena，寻找绑定线程数最少的那个
             for (int i = 1; i < arenas.length; i++) {
                 PoolArena<T> arena = arenas[i];
+                // 比较当前Arena与最小负载Arena的绑定线程数
                 if (arena.numThreadCaches.get() < minArena.numThreadCaches.get()) {
                     minArena = arena;
                 }

@@ -40,7 +40,7 @@ import java.util.List;
  */
 public final class IpSubnetFilterExample {
 
-    static final int PORT = Integer.parseInt(System.getProperty("port", "8009"));
+    static final int PORT = Integer.parse Int(System.getProperty("port", "8009"));
 
     public static void main(String[] args) throws Exception {
         EventLoopGroup bossGroup = new NioEventLoopGroup(1);
@@ -53,6 +53,7 @@ public final class IpSubnetFilterExample {
             rules.add(new IpSubnetFilterRule("10.10.10.0", 24, IpFilterRuleType.REJECT));
             rules.add(new IpSubnetFilterRule("192.168.0.0", 16, IpFilterRuleType.REJECT));
 
+            
             // Share this same Handler instance with multiple ChannelPipeline(s).
             final IpSubnetFilter ipFilter = new IpSubnetFilter(rules);
 
@@ -72,7 +73,7 @@ public final class IpSubnetFilterExample {
                                     System.out.println("Received data from: " + ctx.channel().remoteAddress());
                                 }
                             });
-                        }
+                        } 
                     });
 
             // Bind and start to accept incoming connections.

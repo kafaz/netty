@@ -77,47 +77,143 @@ public abstract class AbstractByteBufAllocator implements ByteBufAllocator {
         ResourceLeakDetector.addExclusions(AbstractByteBufAllocator.class, "toLeakAwareBuffer");
     }
 
+    /**
+     * 将普通ByteBuf转换为具有内存泄漏检测功能的包装缓冲区。
+     * <p>
+     * 此方法是Netty内存泄漏检测系统的核心组件，会根据{@link ResourceLeakDetector}的当前配置级别，
+     * 决定是否以及如何包装输入的ByteBuf，以实现不同级别的内存泄漏检测能力。
+     * </p>
+     * 
+     * <h3>检测级别说明</h3>
+     * <ul>
+     *   <li><b>SIMPLE</b>: 基本检测级别，仅记录泄漏发生的位置</li>
+     *   <li><b>ADVANCED/PARANOID</b>: 高级检测级别，不仅记录泄漏位置，还跟踪缓冲区的分配和使用记录</li>
+     *   <li><b>DISABLED</b>: 禁用检测，不进行包装，直接返回原始缓冲区</li>
+     * </ul>
+     * 
+     * <h3>工作流程</h3>
+     * <ol>
+     *   <li>获取当前系统配置的泄漏检测级别</li>
+     *   <li>根据级别尝试为缓冲区创建对应的泄漏跟踪器</li>
+     *   <li>如果成功创建跟踪器，则用对应级别的包装类包装原始缓冲区</li>
+     *   <li>如果检测级别为DISABLED或创建跟踪器失败，则返回原始缓冲区</li>
+     * </ol>
+     * 
+     * <p>
+     * 注意：此方法对性能有一定影响，尤其在ADVANCED/PARANOID级别下。
+     * 在生产环境中通常建议使用SIMPLE级别或完全禁用。
+     * </p>
+     *
+     * @param buf 原始ByteBuf缓冲区
+     * @return 包装后具有泄漏检测能力的ByteBuf实例，或在检测禁用时返回原始缓冲区
+     * 
+     * @see ResourceLeakDetector
+     * @see SimpleLeakAwareByteBuf
+     * @see AdvancedLeakAwareByteBuf
+     */
     protected static ByteBuf toLeakAwareBuffer(ByteBuf buf) {
+        // 声明泄漏跟踪器变量，用于关联和跟踪ByteBuf的生命周期
         ResourceLeakTracker<ByteBuf> leak;
+        
+        // 获取当前系统配置的泄漏检测级别，并根据不同级别采取不同处理
         switch (ResourceLeakDetector.getLevel()) {
             case SIMPLE:
+                // 简单检测模式：仅记录泄漏发生的位置
+                // 尝试为缓冲区创建泄漏跟踪器
                 leak = AbstractByteBuf.leakDetector.track(buf);
                 if (leak != null) {
+                    // 如果成功创建跟踪器，用SimpleLeakAwareByteBuf包装原始缓冲区
+                    // 这种包装类仅在缓冲区被GC但未正确释放时报告泄漏位置
                     buf = new SimpleLeakAwareByteBuf(buf, leak);
                 }
                 break;
             case ADVANCED:
             case PARANOID:
+                // 高级检测模式：记录泄漏位置和缓冲区的分配、访问历史
+                // 尝试为缓冲区创建泄漏跟踪器
                 leak = AbstractByteBuf.leakDetector.track(buf);
                 if (leak != null) {
+                    // 如果成功创建跟踪器，用AdvancedLeakAwareByteBuf包装原始缓冲区
+                    // 这种包装类会记录所有缓冲区操作，提供更详细的泄漏诊断信息
                     buf = new AdvancedLeakAwareByteBuf(buf, leak);
                 }
                 break;
             default:
+                // DISABLED模式或其他未定义模式：不执行任何包装，直接使用原始缓冲区
                 break;
         }
+        
+        // 返回处理后的缓冲区，可能是原始缓冲区或其包装类
         return buf;
     }
 
+    /**
+     * 将普通CompositeByteBuf转换为具有内存泄漏检测功能的包装缓冲区。
+     * <p>
+     * 此方法是Netty内存泄漏检测系统的核心组件，会根据{@link ResourceLeakDetector}的当前配置级别，
+     * 决定是否以及如何包装输入的CompositeByteBuf，以实现不同级别的内存泄漏检测能力。
+     * </p>
+     * 
+     * <h3>检测级别说明</h3>
+     * <ul>
+     *   <li><b>SIMPLE</b>: 基本检测级别，仅记录泄漏发生的位置</li>
+     *   <li><b>ADVANCED/PARANOID</b>: 高级检测级别，不仅记录泄漏位置，还跟踪缓冲区的分配和使用记录</li>
+     *   <li><b>DISABLED</b>: 禁用检测，不进行包装，直接返回原始缓冲区</li>
+     * </ul>
+     * 
+     * <h3>工作流程</h3>
+     * <ol>
+     *   <li>获取当前系统配置的泄漏检测级别</li>
+     *   <li>根据级别尝试为缓冲区创建对应的泄漏跟踪器</li>
+     *   <li>如果成功创建跟踪器，则用对应级别的包装类包装原始缓冲区</li>
+     *   <li>如果检测级别为DISABLED或创建跟踪器失败，则返回原始缓冲区</li>
+     * </ol>
+     * 
+     * <p>
+     * 注意：此方法对性能有一定影响，尤其在ADVANCED/PARANOID级别下。
+     * 在生产环境中通常建议使用SIMPLE级别或完全禁用。
+     * </p>
+     *
+     * @param buf 原始CompositeByteBuf缓冲区
+     * @return 包装后具有泄漏检测能力的CompositeByteBuf实例，或在检测禁用时返回原始缓冲区
+     * 
+     * @see ResourceLeakDetector
+     * @see SimpleLeakAwareCompositeByteBuf
+     * @see AdvancedLeakAwareCompositeByteBuf
+     */
     protected static CompositeByteBuf toLeakAwareBuffer(CompositeByteBuf buf) {
+        // 声明泄漏跟踪器变量，用于关联和跟踪ByteBuf的生命周期
         ResourceLeakTracker<ByteBuf> leak;
+        
+        // 获取当前系统配置的泄漏检测级别，并根据不同级别采取不同处理
         switch (ResourceLeakDetector.getLevel()) {
             case SIMPLE:
+                // 简单检测模式：仅记录泄漏发生的位置
+                // 尝试为缓冲区创建泄漏跟踪器
                 leak = AbstractByteBuf.leakDetector.track(buf);
                 if (leak != null) {
+                    // 如果成功创建跟踪器，用SimpleLeakAwareCompositeByteBuf包装原始缓冲区
+                    // 这种包装类仅在缓冲区被GC但未正确释放时报告泄漏位置
                     buf = new SimpleLeakAwareCompositeByteBuf(buf, leak);
                 }
                 break;
             case ADVANCED:
             case PARANOID:
+                // 高级检测模式：记录泄漏位置和缓冲区的分配、访问历史
+                // 尝试为缓冲区创建泄漏跟踪器
                 leak = AbstractByteBuf.leakDetector.track(buf);
                 if (leak != null) {
+                    // 如果成功创建跟踪器，用AdvancedLeakAwareCompositeByteBuf包装原始缓冲区
+                    // 这种包装类会记录所有缓冲区操作，提供更详细的泄漏诊断信息
                     buf = new AdvancedLeakAwareCompositeByteBuf(buf, leak);
                 }
                 break;
             default:
+                // DISABLED模式或其他未定义模式：不执行任何包装，直接使用原始缓冲区
                 break;
         }
+        
+        // 返回处理后的缓冲区，可能是原始缓冲区或其包装类
         return buf;
     }
 
