@@ -741,65 +741,196 @@ final class PoolChunk<T> implements PoolChunkMetric {
         }
     }
 
+    /**
+     * 查找第一个包含足够大运行块的队列索引
+     * <p>
+     * 该方法实现了"最佳匹配"策略的核心逻辑，用于在runsAvail数组中查找
+     * 第一个包含可用运行块的队列。从指定的页索引开始向上查找，确保分配
+     * 尽可能小但足够大的运行块，减少内存碎片。
+     * </p>
+     * 
+     * <h3>查找策略</h3>
+     * <p>
+     * 采用"最佳匹配优先"策略：
+     * <ol>
+     *   <li>如果chunk完全空闲，直接返回最大页索引</li>
+     *   <li>否则从指定的页索引开始向上查找</li>
+     *   <li>返回第一个非空队列的索引</li>
+     * </ol>
+     * </p>
+     * 
+     * @param pageIdx 起始页索引，表示所需的最小页数
+     * @return 找到的队列索引，如果没有找到返回-1
+     */
+    private int runFirstBestFit(int pageIdx) {
+        // 如果chunk完全空闲（所有页都可用），直接返回最大页索引
+        // 这是一个优化，避免不必要的循环查找
+        if (freeBytes == chunkSize) {
+            return arena.sizeClass.nPSizes - 1;
+        }
+        
+        // 从指定的页索引开始向上查找
+        // 这确保了我们找到的运行块至少有pageIdx个页
+        for (int i = pageIdx; i < arena.sizeClass.nPSizes; i++) {
+            // 获取当前页索引对应的优先级队列
+            IntPriorityQueue queue = runsAvail[i];
+            
+            // 检查队列是否存在且非空
+            // 队列中存储的是相同大小类别的运行块
+            if (queue != null && !queue.isEmpty()) {
+                // 找到第一个非空队列，返回其索引
+                return i;
+            }
+        }
+        
+        // 没有找到足够大的运行块，返回-1表示分配失败
+        return -1;
+    }
+
+    /**
+     * 计算子页所需的运行块大小
+     * <p>
+     * 该方法用于确定创建子页时所需分配的运行块大小。它会计算页大小和元素大小的最小公倍数，
+     * 以确保运行块能够容纳合适数量的元素，同时保持内存对齐和最小化内存浪费。
+     * </p>
+     * 
+     * <h3>计算策略</h3>
+     * <p>
+     * 该方法采用以下策略计算运行块大小：
+     * <ol>
+     *   <li>从一个页大小开始，逐步增加直到找到合适的大小</li>
+     *   <li>确保运行块大小是页大小的整数倍</li>
+     *   <li>确保运行块能够容纳足够多的元素</li>
+     *   <li>尽量使运行块大小接近页大小和元素大小的最小公倍数</li>
+     *   <li>如果计算出的大小过大，则减小直到满足最大元素数限制</li>
+     * </ol>
+     * </p>
+     * 
+     * @param sizeIdx 元素大小的索引值
+     * @return 计算出的运行块大小（字节）
+     * 
+     * @see SizeClasses#sizeIdx2size(int)
+     */
     private int calculateRunSize(int sizeIdx) {
+        // 计算每个页可以容纳的最大元素数
+        // pageShifts是页大小的位移值，LOG2_QUANTUM是量子大小的位移值
+        // 这个计算确保了我们不会分配过大的运行块
         int maxElements = 1 << pageShifts - SizeClasses.LOG2_QUANTUM;
+        
+        // 初始化运行块大小和元素数量
         int runSize = 0;
         int nElements;
 
+        // 获取元素的实际大小（字节）
+        // 这是通过SizeClasses的映射表获取的标准化大小
         final int elemSize = arena.sizeClass.sizeIdx2size(sizeIdx);
 
-        // find lowest common multiple of pageSize and elemSize
+        // 查找页大小和元素大小的最小公倍数
+        // 这确保了运行块能够容纳整数个元素，减少内存浪费
         do {
+            // 每次增加一个页大小
             runSize += pageSize;
+            
+            // 计算当前运行块大小可以容纳的元素数量
             nElements = runSize / elemSize;
+            
+            // 继续增加运行块大小，直到满足以下条件之一：
+            // 1. 元素数量达到或超过最大元素数
+            // 2. 运行块大小是元素大小的整数倍（无内存浪费）
         } while (nElements < maxElements && runSize != nElements * elemSize);
 
+        // 如果计算出的运行块过大（元素数量超过最大限制）
+        // 则减小运行块大小，直到元素数量不超过最大限制
         while (nElements > maxElements) {
             runSize -= pageSize;
             nElements = runSize / elemSize;
         }
 
+        // 验证计算结果的有效性
+        // 1. 确保至少能容纳一个元素
         assert nElements > 0;
+        // 2. 确保运行块大小不超过整个chunk大小
         assert runSize <= chunkSize;
+        // 3. 确保运行块大小至少能容纳一个元素
         assert runSize >= elemSize;
 
         return runSize;
     }
 
-    private int runFirstBestFit(int pageIdx) {
-        if (freeBytes == chunkSize) {
-            return arena.sizeClass.nPSizes - 1;
-        }
-        for (int i = pageIdx; i < arena.sizeClass.nPSizes; i++) {
-            IntPriorityQueue queue = runsAvail[i];
-            if (queue != null && !queue.isEmpty()) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
+    /**
+     * 分割大型运行块以满足内存分配需求
+     * <p>
+     * 当找到的运行块大于请求的大小时，该方法负责将其分割成两部分：
+     * 一部分用于当前分配（前部分），另一部分（尾部）保留为可用运行块供后续使用。
+     * 这种分割策略有助于提高内存利用率，减少内存碎片。
+     * </p>
+     * 
+     * <h3>分割策略</h3>
+     * <p>
+     * 具体步骤如下：
+     * <ol>
+     *   <li>计算运行块总页数和剩余页数</li>
+     *   <li>如果有剩余页，创建新的可用运行块</li>
+     *   <li>将新的可用运行块插入到管理数据结构中</li>
+     *   <li>创建并返回分配部分的运行块句柄</li>
+     * </ol>
+     * </p>
+     * 
+     * <h3>句柄处理</h3>
+     * <p>
+     * 对于分配的运行块，会设置isUsed=1标志，表示该内存区域已被分配。
+     * 对于剩余的可用运行块，会设置isUsed=0标志，并将其添加到可用运行块管理结构中。
+     * </p>
+     * 
+     * @param handle 原始运行块的句柄
+     * @param needPages 需要分配的页数
+     * @return 分配部分的新句柄
+     * 
+     * @see #toRunHandle(int, int, int)
+     * @see #insertAvailRun(int, int, long)
+     */
     private long splitLargeRun(long handle, int needPages) {
+        // 确保请求的页数大于0
+        // 这是一个基本的参数验证
         assert needPages > 0;
 
+        // 获取原始运行块的总页数
+        // 通过句柄解码获取size字段
         int totalPages = runPages(handle);
+        
+        // 确保请求的页数不超过总页数
+        // 这是一个参数验证，确保分割是可行的
         assert needPages <= totalPages;
 
+        // 计算分割后剩余的页数
+        // 这些页将形成一个新的可用运行块
         int remPages = totalPages - needPages;
 
+        // 如果有剩余页（需要分割）
         if (remPages > 0) {
+            // 获取原始运行块的偏移量
+            // 这将用于计算新运行块的位置
             int runOffset = runOffset(handle);
 
-            // keep track of trailing unused pages for later use
+            // 创建新的可用运行块（尾部）
+            // 1. 计算新运行块的偏移量 = 原偏移量 + 分配的页数
             int availOffset = runOffset + needPages;
+            
+            // 2. 创建新运行块的句柄
+            // 参数：偏移量、页数、使用标志(0表示未使用)
             long availRun = toRunHandle(availOffset, remPages, 0);
+            
+            // 3. 将新的可用运行块插入到管理数据结构中
+            // 这样它可以在后续分配中被使用
             insertAvailRun(availOffset, remPages, availRun);
 
-            // not avail
+            // 创建并返回分配部分的运行块句柄
+            // 参数：原偏移量、需要的页数、使用标志(1表示已使用)
             return toRunHandle(runOffset, needPages, 1);
         }
 
-        // mark it as used
+        // 如果没有剩余页（不需要分割）
+        // 直接将原始句柄标记为已使用并返回
         handle |= 1L << IS_USED_SHIFT;
         return handle;
     }
