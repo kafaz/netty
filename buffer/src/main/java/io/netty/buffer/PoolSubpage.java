@@ -34,10 +34,10 @@ import static io.netty.buffer.PoolChunk.IS_SUBPAGE_SHIFT;
  * <p>
  * PoolSubpage将一个页面（通常为8KB）划分为多个大小相等的小内存块。例如，一个页面可以被划分为：
  * <ul>
- *   <li>512个16字节的小块</li>
- *   <li>256个32字节的小块</li>
- *   <li>128个64字节的小块</li>
- *   <li>以此类推</li>
+ * <li>512个16字节的小块</li>
+ * <li>256个32字节的小块</li>
+ * <li>128个64字节的小块</li>
+ * <li>以此类推</li>
  * </ul>
  * 每个小块的分配状态通过位图中的单个位记录：0表示可用，1表示已分配。
  * </p>
@@ -67,47 +67,47 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
      * 所属的内存块，包含实际的内存数据
      */
     final PoolChunk<T> chunk;
-    
+
     /**
      * 子页中每个元素(小内存块)的大小，单位为字节
      */
     final int elemSize;
-    
+
     /**
      * 页面大小的位移值，用于地址计算
      * 例如：如果页面大小为8KB(8192)，则pageShifts为13(2^13=8192)
      */
     private final int pageShifts;
-    
+
     /**
      * 在chunk中的页面偏移量
      * 用于计算内存的实际物理地址
      */
     private final int runOffset;
-    
+
     /**
      * 子页总大小，通常为一个页面大小(runSize)
      */
     private final int runSize;
-    
+
     /**
      * 位图数组，用于跟踪每个小内存块的分配状态
      * 每个bit对应一个小内存块：0=可用，1=已分配
      */
     private final long[] bitmap;
-    
+
     /**
      * 位图数组的长度
      * 由最大元素数量决定：bitmapLength = (maxNumElems + 63) / 64
      */
     private final int bitmapLength;
-    
+
     /**
      * 子页能容纳的最大元素(小内存块)数量
      * maxNumElems = runSize / elemSize
      */
     private final int maxNumElems;
-    
+
     /**
      * 在arena子页池数组中的索引位置
      * 用于快速找到对应大小的子页池
@@ -119,7 +119,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
      * 用于子页池的链表管理
      */
     PoolSubpage<T> prev;
-    
+
     /**
      * 双向链表后向指针，指向后一个PoolSubpage
      * 用于子页池的链表管理
@@ -131,14 +131,14 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
      * 当子页仍有分配的内存块时为true
      */
     boolean doNotDestroy;
-    
+
     /**
      * 下一个可用的位图索引
      * 用于快速找到下一个可分配的位置
      * -1表示没有快速路径，需要遍历位图找寻
      */
     private int nextAvail;
-    
+
     /**
      * 当前可用的元素(小内存块)数量
      * 初始值等于maxNumElems，每次分配减1，释放加1
@@ -151,7 +151,7 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
      */
     final ReentrantLock lock;
 
-    /** 
+    /**
      * 创建一个特殊的链表头节点
      * 该构造函数用于在PoolArena中创建子页池的头节点
      * 头节点不包含实际内存，仅作为链表管理用途
@@ -179,12 +179,12 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
      * 创建一个实际的子页实例
      * 该构造函数用于创建可分配内存的子页
      * 
-     * @param head 所属子页池的头节点
-     * @param chunk 所属的内存块
+     * @param head       所属子页池的头节点
+     * @param chunk      所属的内存块
      * @param pageShifts 页面大小的位移值
-     * @param runOffset 在chunk中的页面偏移量
-     * @param runSize 子页总大小
-     * @param elemSize 每个元素的大小
+     * @param runOffset  在chunk中的页面偏移量
+     * @param runSize    子页总大小
+     * @param elemSize   每个元素的大小
      */
     PoolSubpage(PoolSubpage<T> head, PoolChunk<T> chunk, int pageShifts, int runOffset, int runSize, int elemSize) {
         // 1. 初始化基本属性
@@ -218,48 +218,90 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
 
     /**
      * 分配一个元素(小内存块)
+     * <p>
+     * 该方法从子页中分配一个小内存块，通过位图管理机制跟踪内存分配状态。
+     * 每次分配时，会在位图中找到下一个可用位置，将其标记为已分配，并返回对应的内存句柄。
+     * </p>
+     * 
+     * <h3>分配流程</h3>
+     * <ol>
+     *   <li>首先检查子页是否有可用空间和是否处于活跃状态</li>
+     *   <li>找到下一个可用的位图索引位置</li>
+     *   <li>将该位置在位图中标记为已分配(设置对应位为1)</li>
+     *   <li>更新可用计数和子页状态</li>
+     *   <li>将位图索引转换为内存句柄返回</li>
+     * </ol>
+     * 
+     * <h3>内存句柄编码</h3>
+     * <p>
+     * 返回的内存句柄是一个64位长整型，包含以下信息：
+     * <ul>
+     *   <li>runOffset - 子页在chunk中的页偏移量</li>
+     *   <li>size - 子页大小(以页为单位)</li>
+     *   <li>isUsed - 标记为已使用</li>
+     *   <li>isSubpage - 标记为子页类型</li>
+     *   <li>bitmapIdx - 在子页内部的位图索引</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>线程安全</h3>
+     * <p>
+     * 该方法本身不是线程安全的，调用者需要通过子页池头节点的锁确保线程安全。
+     * </p>
      * 
      * @return 分配的内存句柄，失败时返回-1
+     * 
+     * @see #getNextAvail()
+     * @see #toHandle(int)
+     * @see #removeFromPool()
      */
     long allocate() {
         // 检查是否有可用空间，或者子页是否标记为销毁
+        // numAvail为0表示所有元素都已分配，doNotDestroy为false表示子页已被标记为可销毁
         if (numAvail == 0 || !doNotDestroy) {
-            return -1;
+            return -1; // 无法分配，返回失败标识
         }
 
         // 获取下一个可用的位图索引
+        // 通过位图查找算法找到第一个未分配的位置
         final int bitmapIdx = getNextAvail();
         if (bitmapIdx < 0) {
             // 无法找到可用位置，子页状态异常
+            // 这是一个内部错误，理论上不应该发生，因为numAvail>0
             removeFromPool(); // 从池中移除以防止重复错误
             throw new AssertionError("No next available bitmap index found (bitmapIdx = " + bitmapIdx + "), " +
                     "even though there are supposed to be (numAvail = " + numAvail + ") " +
                     "out of (maxNumElems = " + maxNumElems + ") available indexes.");
         }
-        
+
         // 计算位图数组索引和位偏移
-        int q = bitmapIdx >>> 6; // 数组索引 = bitmapIdx / 64
-        int r = bitmapIdx & 63;  // 位偏移 = bitmapIdx % 64
-        
+        // bitmap是一个long数组，每个long有64位，需要计算bitmapIdx对应的数组索引和位偏移
+        int q = bitmapIdx >>> 6; // 数组索引 = bitmapIdx / 64 (位移操作更高效)
+        int r = bitmapIdx & 63;  // 位偏移 = bitmapIdx % 64 (位与操作更高效)
+
         // 确保该位未被设置(未分配)
+        // 这是一个断言检查，确保我们不会重复分配同一个位置
         assert (bitmap[q] >>> r & 1) == 0;
-        
+
         // 设置对应位为1，标记为已分配
+        // 使用位或操作将特定位设置为1，其他位保持不变
         bitmap[q] |= 1L << r;
 
         // 可用数量减1，如果变为0则从池中移除
+        // 当子页没有可用空间时，将其从子页池中移除，避免后续分配尝试
         if (--numAvail == 0) {
             removeFromPool();
         }
 
         // 转换为内存句柄返回
+        // 将位图索引编码到内存句柄中，包含子页的位置和元素在子页中的位置信息
         return toHandle(bitmapIdx);
     }
 
     /**
      * 释放一个元素(小内存块)
      * 
-     * @param head 所属子页池的头节点
+     * @param head      所属子页池的头节点
      * @param bitmapIdx 要释放的位图索引
      * @return true表示子页仍在使用，false表示子页可以被销毁
      */
@@ -267,10 +309,10 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
         // 计算位图数组索引和位偏移
         int q = bitmapIdx >>> 6; // 数组索引
         int r = bitmapIdx & 63;  // 位偏移
-        
+
         // 确保该位已被设置(已分配)
         assert (bitmap[q] >>> r & 1) != 0;
-        
+
         // 翻转对应位，设置为0，标记为未分配
         bitmap[q] ^= 1L << r;
 
@@ -385,34 +427,95 @@ final class PoolSubpage<T> implements PoolSubpageMetric {
     }
 
     /**
-     * 在指定位图块中查找第一个可用位置
+     * 在指定位图块中查找第一个可用的内存单元位置。
+     * <p>
+     * 位图使用二进制位表示内存单元的分配状态：
+     * - 0表示内存单元可用（未分配）
+     * - 1表示内存单元已被分配
+     * </p>
+     * <p>
+     * 该方法遍历指定位图块(通常为一个long值，64位)中的每一位，
+     * 寻找第一个值为0的位，并计算其对应的绝对位图索引。
+     * </p>
+     * <p>
+     * 算法复杂度：O(1)，最多遍历64位，常数时间复杂度。
+     * </p>
      * 
-     * @param i 位图数组索引
-     * @param bits 位图值
-     * @return 找到的位图索引，如果没有则返回-1
+     * @param i    位图数组索引，表示要检查的long数组元素的索引
+     * @param bits 待检查的位图值，即bitmap[i]的内容，表示64个内存单元的分配状态
+     * @return 找到的可用位置的绝对位图索引；如果没有可用位置或超出有效范围，则返回-1
+     * 
+     * @see #findNextAvail()
+     * @see #getNextAvail()
      */
     private int findNextAvail0(int i, long bits) {
-        // 计算基础值(本块的起始索引)
+        // 计算基础位图索引值 - 将数组索引转换为位索引的起始点
+        // 例如：如果i=1，则baseVal=64，表示从第64位开始
+        // 左移6位相当于乘以64，因为每个long包含64位
         final int baseVal = i << 6;
-        // 遍历64位
+        // 遍历当前long值中的全部64位
         for (int j = 0; j < 64; j++) {
             // 检查当前位是否为0(未分配)
+            // 按位与操作(&1)提取最低位，如果为0表示该位未被分配
+            // 例如：bits=0b10101100，则bits&1=0，表示最低位未分配
             if ((bits & 1) == 0) {
-                // 计算位图索引
+                // 计算绝对位图索引：基础索引 + 当前位偏移
+                // 按位或操作(|)等同于加法(仅当j<64)
+                // 例如：baseVal=64, j=3，则val=67，表示第67个内存单元
                 int val = baseVal | j;
-                // 确保索引在有效范围内
+                // 确保计算出的索引在有效范围内(小于最大元素数)
+                // 防止在最后一个long块中访问超出实际元素数量的位置
+                // 例如：如果maxNumElems=100，而计算出val=120，则无效
                 if (val < maxNumElems) {
-                    return val;
+                    return val; // 返回有效的可用位置索引
                 } else {
-                    // 超出范围，退出循环
+                    // 超出有效范围，提前结束循环，优化性能
                     break;
                 }
             }
-            // 右移一位，检查下一位
+
+            // 无符号右移一位，检查下一位状态
+            // 例如：bits=0b1010，右移后变成0b0101
+            // 这样便可以依次检查每一位的分配状态
             bits >>>= 1;
         }
-        return -1; // 没有找到可用位置
+        // 没有找到可用位置，返回-1表示失败
+        return -1;
     }
+
+    /**
+     * 在指定位图块中查找第一个可用的内存单元位置。
+     * <p>
+     * 使用位操作直接查找第一个可用位置，完全消除循环，提供O(1)的时间复杂度。
+     * </p>
+     * 
+     * @param i    位图数组索引
+     * @param bits 待检查的位图值
+     * @return 找到的可用位置的绝对位图索引；如果没有则返回-1
+     */
+    // private int findNextAvail0(int i, long bits) {
+    //     // 我们需要找到第一个为0的位，先对位图取反
+    //     // 取反后，原来的0变成1，我们要找的就是第一个为1的位
+    //     long invertedBits = ~bits;
+
+    //     // 如果全部位都是1(位图中全是0)，直接返回基础索引
+    //     if (invertedBits == 0) {
+    //         return -1; // 没有可用位置
+    //     }
+
+    //     // 计算基础索引值
+    //     final int baseVal = i << 6;
+
+    //     // 使用numberOfTrailingZeros找到最低位的1
+    //     // 这个API返回二进制表示中尾部0的数量，相当于找到第一个1的位置
+    //     int bitPosition = Long.numberOfTrailingZeros(invertedBits);
+
+    //     // 计算绝对位图索引
+    //     int val = baseVal | bitPosition;
+
+    //     // 检查是否在有效范围内
+    //     return val < maxNumElems ? val : -1;
+    // }
 
     /**
      * 将位图索引转换为内存句柄

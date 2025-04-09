@@ -330,6 +330,7 @@ final class PoolChunk<T> implements PoolChunkMetric {
         this.pageSize = pageSize;     // 页面大小
         this.pageShifts = pageShifts; // 页面大小的位移值
         this.chunkSize = chunkSize;   // 内存块大小
+        //? maxPageIdx和pageSize chunkSize之间是否存在关系?
         this.maxPageIdx = maxPageIdx; // 最大页面索引
         
         // 初始化可用字节数为整个chunk大小
@@ -346,16 +347,20 @@ final class PoolChunk<T> implements PoolChunkMetric {
         // 键为运行块偏移量，值为运行块句柄
         runsAvailMap = new LongLongHashMap(-1);
         
-        // 创建子页数组，大小为chunk中的页面数量
-        // chunkSize >> pageShifts 计算页面数量
-        subpages = new PoolSubpage[chunkSize >> pageShifts];
 
         // 初始化第一个可用运行块
         // 1. 计算页面数量
         int pages = chunkSize >> pageShifts;
+        // 创建子页数组，大小为chunk中的页面数量
+        // chunkSize >> pageShifts 计算一个chunk的总页面数量
+        subpages = new PoolSubpage[pages];
+        
+
         // 2. 创建初始运行块句柄
         // 句柄格式：0...0 0000 0000 0000 0000 0000 0000 0000 0000
         //           |<-- 页数(15位) -->|<-- 未使用(32位) -->|
+        // ? 初始句柄为什么不是全0的long结构?
+
         long initHandle = (long) pages << SIZE_SHIFT;
         // 3. 将初始运行块插入可用运行块映射
         insertAvailRun(0, pages, initHandle);
@@ -390,16 +395,60 @@ final class PoolChunk<T> implements PoolChunkMetric {
         return queueArray;
     }
 
+    /**
+     * 将可用的运行块(run)插入到管理数据结构中
+     * <p>
+     * 该方法负责将一个新的可用运行块添加到两个关键数据结构中：
+     * <ul>
+     *   <li>runsAvail - 按大小分类的优先级队列数组</li>
+     *   <li>runsAvailMap - 按偏移量索引的哈希映射</li>
+     * </ul>
+     * </p>
+     * 
+     * <h3>运行块管理机制</h3>
+     * <p>
+     * 为了高效地管理和查找运行块，该方法执行以下操作：
+     * <ol>
+     *   <li>根据运行块的页数确定其在runsAvail数组中的索引位置</li>
+     *   <li>将运行块添加到对应大小类别的优先级队列中</li>
+     *   <li>在runsAvailMap中记录运行块的首页和尾页（如果有多页）</li>
+     * </ol>
+     * 这种双重索引机制使得内存分配器能够：
+     * <ul>
+     *   <li>快速找到特定大小的可用运行块</li>
+     *   <li>通过页面偏移量快速定位和合并相邻的运行块</li>
+     * </ul>
+     * </p>
+     *
+     * @param runOffset 运行块在chunk中的页面偏移量
+     * @param pages 运行块包含的页面数量
+     * @param handle 运行块的内存句柄，编码了运行块的关键信息
+     * 
+     * @see #insertAvailRun0(int, long)
+     * @see #lastPage(int, int)
+     */
     private void insertAvailRun(int runOffset, int pages, long handle) {
+        // 根据页面数量计算适合该运行块的大小类别索引
+        // 使用floor确保获取不大于当前页数的最大索引
         int pageIdxFloor = arena.sizeClass.pages2pageIdxFloor(pages);
+        
+        // 获取对应大小类别的优先级队列
         IntPriorityQueue queue = runsAvail[pageIdxFloor];
+        
+        // 确保handle表示的是运行块而非子页
         assert isRun(handle);
+        
+        // 将运行块添加到优先级队列中
+        // 注意：这里将64位handle右移32位，只保留高32位信息用于排序
         queue.offer((int) (handle >> BITMAP_IDX_BIT_LENGTH));
 
-        // insert first page of run
+        // 在映射表中记录运行块的第一页
+        // 这使得我们可以通过页面偏移量快速查找运行块
         insertAvailRun0(runOffset, handle);
+        
         if (pages > 1) {
-            // insert last page of run
+            // 如果运行块有多页，还需要记录最后一页
+            // 这对于合并相邻运行块至关重要
             insertAvailRun0(lastPage(runOffset, pages), handle);
         }
     }
@@ -603,33 +652,91 @@ final class PoolChunk<T> implements PoolChunkMetric {
         return true;
     }
 
+    /**
+     * 分配指定大小的运行块(run)
+     * <p>
+     * 该方法负责从当前chunk中分配一个指定大小的连续内存区域(运行块)。
+     * 它会在可用运行块队列中查找第一个足够大的运行块，如果找到的运行块大于请求的大小，
+     * 会将其分割成两部分：一部分用于分配，另一部分保留为可用运行块。
+     * </p>
+     * 
+     * <h3>分配策略</h3>
+     * <p>
+     * 采用"最佳匹配"策略，具体步骤：
+     * <ol>
+     *   <li>将请求的字节大小转换为页数</li>
+     *   <li>找到第一个包含足够大运行块的队列</li>
+     *   <li>从该队列中获取偏移量最小的运行块</li>
+     *   <li>如果运行块大于所需大小，分割它</li>
+     *   <li>更新可用内存计数</li>
+     * </ol>
+     * </p>
+     * 
+     * <h3>线程安全</h3>
+     * <p>
+     * 该方法通过runsAvailLock锁确保线程安全，防止多线程并发分配时的竞态条件。
+     * </p>
+     * 
+     * @param runSize 请求分配的运行块大小(字节)
+     * @return 成功分配时返回内存句柄，失败时返回-1
+     * 
+     * @see #runFirstBestFit(int)
+     * @see #splitLargeRun(long, int)
+     * @see #removeAvailRun0(long)
+     */
     private long allocateRun(int runSize) {
+        // 将请求的字节大小转换为页数
+        // 右移pageShifts位相当于除以pageSize
         int pages = runSize >> pageShifts;
+        
+        // 将页数转换为页索引，用于在runsAvail数组中查找合适的队列
+        // 这是一个映射操作，将实际页数映射到SizeClasses中定义的标准大小索引
         int pageIdx = arena.sizeClass.pages2pageIdx(pages);
 
+        // 获取锁，确保线程安全
+        // 这是必要的，因为可能有多个线程同时尝试分配内存
         runsAvailLock.lock();
         try {
-            // find first queue which has at least one big enough run
+            // 查找第一个包含足够大运行块的队列
+            // 从pageIdx开始向上查找，直到找到一个非空队列
             int queueIdx = runFirstBestFit(pageIdx);
             if (queueIdx == -1) {
+                // 没有找到足够大的运行块，分配失败
                 return -1;
             }
 
-            // get run with min offset in this queue
+            // 从找到的队列中获取偏移量最小的运行块
+            // 这确保了内存分配从低地址向高地址进行，减少内存碎片
             IntPriorityQueue queue = runsAvail[queueIdx];
             long handle = queue.poll();
+            
+            // 确保获取到有效的句柄
             assert handle != IntPriorityQueue.NO_VALUE;
+            
+            // 将句柄左移BITMAP_IDX_BIT_LENGTH位，为bitmapIdx字段腾出空间
+            // 因为优先队列中存储的是压缩后的句柄（没有包含bitmapIdx）
             handle <<= BITMAP_IDX_BIT_LENGTH;
+            
+            // 确保获取到的运行块未被使用
             assert !isUsed(handle) : "invalid handle: " + handle;
 
+            // 从可用运行块映射中移除该运行块
+            // 这是必要的，因为该运行块即将被分配或分割
             removeAvailRun0(handle);
 
+            // 如果运行块大于所需大小，分割它
+            // 这会返回一个新的句柄，表示分配的部分
             handle = splitLargeRun(handle, pages);
 
+            // 计算分配的内存大小并更新可用字节数
+            // 这用于跟踪chunk的内存使用情况
             int pinnedSize = runSize(pageShifts, handle);
             freeBytes -= pinnedSize;
+            
+            // 返回分配的内存句柄
             return handle;
         } finally {
+            // 释放锁，允许其他线程进行内存分配
             runsAvailLock.unlock();
         }
     }
@@ -734,22 +841,52 @@ final class PoolChunk<T> implements PoolChunkMetric {
      * @see #calculateRunSize(int)
      */
     private long allocateSubpage(int sizeIdx, PoolSubpage<T> head) {
-        // allocate a new run
+        // 计算子页所需的运行块大小
+        // 这个大小通常是页大小的整数倍，确保能容纳多个相同大小的元素
+        // calculateRunSize会找到pageSize和elemSize的最小公倍数，优化内存利用率
         int runSize = calculateRunSize(sizeIdx);
-        // runSize must be multiples of pageSize
+        
+        // 分配一个指定大小的运行块作为子页的基础
+        // 这会调用allocateRun方法，从chunk中分配连续内存
+        // 返回的句柄已经设置了isUsed=1标志
         long runHandle = allocateRun(runSize);
         if (runHandle < 0) {
+            // 如果运行块分配失败（可能是内存不足），子页创建也失败
+            // 返回-1表示分配失败
             return -1;
         }
 
+        // 获取运行块在chunk中的页偏移量
+        // 这将用作子页在subpages数组中的索引，便于后续快速查找
         int runOffset = runOffset(runHandle);
+        
+        // 确保该位置没有已存在的子页
+        // 这是一个断言检查，防止覆盖已有子页，避免内存泄漏
         assert subpages[runOffset] == null;
+        
+        // 获取元素大小，用于初始化子页
+        // 这决定了子页内每个小内存块的大小，由SizeClasses提供标准化大小
         int elemSize = arena.sizeClass.sizeIdx2size(sizeIdx);
 
+        // 创建新的子页对象
+        // 参数包括：
+        // - head: 子页池头节点，用于将子页链接到池中
+        // - this: 当前chunk，表示子页所属的内存块
+        // - pageShifts: 页大小位移值，用于计算内存偏移量
+        // - runOffset: 运行块偏移量，子页在chunk中的位置
+        // - runSize: 运行块大小，决定子页可用的总内存
+        // - elemSize: 元素大小，决定子页内每个小内存块的大小
         PoolSubpage<T> subpage = new PoolSubpage<T>(head, this, pageShifts, runOffset,
                 runSize(pageShifts, runHandle), elemSize);
 
+        // 将新创建的子页存储在subpages数组中
+        // 这样可以通过runOffset快速找到对应的子页
+        // 当释放子页内存时，也需要通过这个数组找到子页对象
         subpages[runOffset] = subpage;
+        
+        // 从新创建的子页中分配一个元素
+        // 这会更新子页的内部位图状态，标记第一个位置为已使用
+        // 返回的句柄包含了子页位置和位图索引信息
         return subpage.allocate();
     }
 
